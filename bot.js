@@ -26,12 +26,22 @@ const normalizePhone = (p = "") => {
 async function isAdmin(phone) {
   try {
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/admin_phones?phone=eq.${encodeURIComponent(phone)}&select=phone`,
+      `${SUPABASE_URL}/rest/v1/admins_phones_numbers?select=phone`,
       { headers }
     );
     const data = await r.json().catch(() => []);
-    return Array.isArray(data) && data.length > 0;
-  } catch {
+    if (!Array.isArray(data)) return false;
+
+    // phone в базе хранится как jsonb строка: "+998931165715"
+    // data[i].phone может быть строкой "+998..." или уже распарсенным строкой
+    return data.some((row) => {
+      const stored = typeof row.phone === "string"
+        ? row.phone.replace(/^"|"$/g, "").trim() // убираем кавычки если есть
+        : String(row.phone).trim();
+      return normalizePhone(stored) === normalizePhone(phone);
+    });
+  } catch (e) {
+    console.log("isAdmin error:", e);
     return false;
   }
 }
@@ -236,6 +246,7 @@ export async function startBot() {
     await ctx.reply("✅ Номер подтверждён!", Markup.removeKeyboard());
 
     // Проверяем — админ?
+    console.log("Checking admin for phone:", phone);
     const admin = await isAdmin(phone);
     const backUrl = `${process.env.SITE_URL}/verify?sessionId=${sessionId}`;
 
@@ -347,7 +358,7 @@ export async function startBot() {
     try {
       // Получаем всех админов из Supabase
       const r = await fetch(
-        `${SUPABASE_URL}/rest/v1/admin_phones?select=phone`,
+        `${SUPABASE_URL}/rest/v1/admins_phones_numbers?select=phone`,
         { headers }
       );
       const admins = await r.json().catch(() => []);
