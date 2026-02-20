@@ -1,7 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import { startBot } from "./bot.js";
-import { startBot } from "./bot.js";
+
 dotenv.config();
 
 const app = express();
