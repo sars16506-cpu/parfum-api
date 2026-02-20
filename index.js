@@ -132,3 +132,9 @@ app.listen(PORT || 3000, () => {
   console.log("✅ Server running on port", PORT || 3000);
   startBot();
 });
+console.log("STARTING APP...");
+console.log({
+  PORT: process.env.PORT,
+  BOT_TOKEN: !!process.env.BOT_TOKEN,
+  SUPABASE_URL: !!process.env.SUPABASE_URL
+});
