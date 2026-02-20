@@ -4,6 +4,13 @@ import { startBot } from "./bot.js";
 
 dotenv.config();
 
+console.log("STARTING APP...");
+console.log({
+  PORT: process.env.PORT,
+  BOT_TOKEN: !!process.env.BOT_TOKEN,
+  SUPABASE_URL: !!process.env.SUPABASE_URL,
+});
+
 const app = express();
 app.use(express.json());
 
@@ -27,9 +34,11 @@ const normalizePhone = (p = "") => {
   return s;
 };
 
+app.get("/", (req, res) => res.send("OK"));
+
 app.post("/start-verify", async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { phone } = req.body || {};
     if (!phone) return res.status(400).json({ error: "Phone required" });
 
     const expectedPhone = normalizePhone(phone);
@@ -40,18 +49,19 @@ app.post("/start-verify", async (req, res) => {
       body: JSON.stringify([{ phone: expectedPhone, verified: false }]),
     });
 
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(400).json({ error: data });
 
     const sessionId = data?.[0]?.id;
-    if (!sessionId) return res.status(500).json({ error: "No sessionId returned" });
+    if (!sessionId)
+      return res.status(500).json({ error: "No sessionId returned" });
 
     res.json({
       sessionId,
       tgLink: `https://t.me/${process.env.BOT_USERNAME}?start=${sessionId}`,
     });
   } catch (err) {
-    console.log(err);
+    console.log("START-VERIFY ERROR:", err);
     res.status(500).json({ error: "server error" });
   }
 });
@@ -63,7 +73,7 @@ app.post("/confirm", async (req, res) => {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const { sessionId, phone } = req.body;
+    const { sessionId, phone } = req.body || {};
     if (!sessionId || !phone) {
       return res.status(400).json({ error: "sessionId and phone required" });
     }
@@ -75,7 +85,7 @@ app.post("/confirm", async (req, res) => {
       { headers }
     );
 
-    const rows = await rr.json();
+    const rows = await rr.json().catch(() => ({}));
     if (!rr.ok) return res.status(400).json({ error: rows });
 
     const row = rows?.[0];
@@ -107,7 +117,7 @@ app.post("/confirm", async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    console.log(err);
+    console.log("CONFIRM ERROR:", err);
     res.status(500).json({ error: "confirm error" });
   }
 });
@@ -119,22 +129,17 @@ app.get("/status/:id", async (req, res) => {
       { headers }
     );
 
-    const data = await r.json();
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(400).json({ error: data });
 
     res.json({ verified: data?.[0]?.verified === true });
   } catch (err) {
+    console.log("STATUS ERROR:", err);
     res.status(500).json({ error: "status error" });
   }
 });
 
-app.listen(PORT || 3000, () => {
-  console.log("✅ Server running on port", PORT || 3000);
+app.listen(PORT, () => {
+  console.log("✅ Server running on port", PORT);
   startBot();
-});
-console.log("STARTING APP...");
-console.log({
-  PORT: process.env.PORT,
-  BOT_TOKEN: !!process.env.BOT_TOKEN,
-  SUPABASE_URL: !!process.env.SUPABASE_URL
 });

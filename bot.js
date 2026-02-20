@@ -5,7 +5,11 @@ dotenv.config();
 
 const sessions = new Map();
 
-export function startBot() {
+export async function startBot() {
+  if (!process.env.BOT_TOKEN) throw new Error("BOT_TOKEN missing");
+  if (!process.env.SERVER_URL) throw new Error("SERVER_URL missing");
+  if (!process.env.SITE_URL) throw new Error("SITE_URL missing");
+
   const bot = new Telegraf(process.env.BOT_TOKEN);
 
   bot.start((ctx) => {
@@ -55,6 +59,13 @@ export function startBot() {
     );
   });
 
-  bot.launch();
-  console.log("✅ Bot running...");
+  try {
+    await bot.launch();
+    console.log("✅ Bot running...");
+  } catch (e) {
+    const msg = e?.response?.description || e?.message || String(e);
+    console.log("❌ BOT LAUNCH ERROR:", msg);
+    if (String(msg).includes("409")) return;
+    throw e;
+  }
 }
