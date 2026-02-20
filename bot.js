@@ -3,7 +3,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const sessions = new Map(); // tgId -> sessionId
-const adminSessions = new Set(); // tgId тех кто уже прошёл как админ
+const adminSessions = new Set(); // tgId тех кто авторизован как админ
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -14,7 +14,7 @@ const headers = {
   "Content-Type": "application/json",
 };
 
-// ─── Утилиты ───────────────────────────────────────────────────────────────
+// ─── Утилиты ─────────────────────────────────────────────────────────────────
 
 const normalizePhone = (p = "") => {
   let s = String(p).trim().replace(/[^\d+]/g, "");
@@ -32,13 +32,16 @@ async function isAdmin(phone) {
     const data = await r.json().catch(() => []);
     if (!Array.isArray(data)) return false;
 
-    // phone в базе хранится как jsonb строка: "+998931165715"
-    // data[i].phone может быть строкой "+998..." или уже распарсенным строкой
+    console.log("Admin phones from DB:", JSON.stringify(data));
+    console.log("Checking phone:", phone);
+
     return data.some((row) => {
       const stored = typeof row.phone === "string"
-        ? row.phone.replace(/^"|"$/g, "").trim() // убираем кавычки если есть
+        ? row.phone.replace(/^"|"$/g, "").trim()
         : String(row.phone).trim();
-      return normalizePhone(stored) === normalizePhone(phone);
+      const match = normalizePhone(stored) === normalizePhone(phone);
+      console.log(`Compare: "${normalizePhone(stored)}" === "${normalizePhone(phone)}" -> ${match}`);
+      return match;
     });
   } catch (e) {
     console.log("isAdmin error:", e);
@@ -46,7 +49,34 @@ async function isAdmin(phone) {
   }
 }
 
-async function getOrders(limit = 20) {
+async function getProductsByIds(ids) {
+  if (!ids || ids.length === 0) return [];
+  try {
+    const filter = ids.map((id) => `id.eq.${id}`).join(",");
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/products?or=(${filter})&select=id,title,item_left`,
+      { headers }
+    );
+    return r.json().catch(() => []);
+  } catch {
+    return [];
+  }
+}
+
+async function getProductById(productId) {
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/products?id=eq.${productId}&select=id,title,item_left`,
+      { headers }
+    );
+    const data = await r.json().catch(() => []);
+    return data?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getOrders(limit = 30) {
   const r = await fetch(
     `${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=${limit}`,
     { headers }
@@ -71,20 +101,15 @@ async function getOrderItemsStatus(orderId) {
   return r.json().catch(() => []);
 }
 
-async function toggleItemGiven(orderId, productId, newGiven) {
-  // Upsert статуса (нужен unique constraint на order_id + product_id в Supabase)
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/order_items_status`, {
+async function setItemGiven(orderId, productId, newGiven) {
+  await fetch(`${SUPABASE_URL}/rest/v1/order_items_status`, {
     method: "POST",
-    headers: {
-      ...headers,
-      Prefer: "resolution=merge-duplicates,return=representation",
-    },
+    headers: { ...headers, Prefer: "resolution=merge-duplicates,return=representation" },
     body: JSON.stringify([{ order_id: orderId, product_id: productId, given: newGiven }]),
   });
 
-  if (!newGiven) return; // если снимаем галочку — не трогаем item_left
+  if (!newGiven) return; // снятие галочки — не трогаем stock
 
-  // Если выдан — уменьшаем item_left у продукта
   try {
     const order = await getOrderById(orderId);
     if (!order?.items) return;
@@ -93,36 +118,33 @@ async function toggleItemGiven(orderId, productId, newGiven) {
     if (!item) return;
 
     const qty = item.quantity || 1;
-
-    const pr = await fetch(
-      `${SUPABASE_URL}/rest/v1/perfumes?id=eq.${productId}&select=id,item_left`,
-      { headers }
-    );
-    const [product] = await pr.json().catch(() => []);
+    const product = await getProductById(productId);
     if (!product) return;
 
     const newLeft = Math.max(0, (product.item_left || 0) - qty);
-
-    await fetch(`${SUPABASE_URL}/rest/v1/perfumes?id=eq.${productId}`, {
+    await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${productId}`, {
       method: "PATCH",
       headers,
       body: JSON.stringify({ item_left: newLeft }),
     });
+    console.log(`item_left: ${product.item_left} -> ${newLeft} for ${productId}`);
   } catch (e) {
-    console.log("toggleItemGiven error:", e);
+    console.log("setItemGiven error:", e);
   }
 }
 
-// ─── Форматирование ─────────────────────────────────────────────────────────
+// ─── Форматирование ───────────────────────────────────────────────────────────
 
-function formatOrderMessage(order, statuses = []) {
+async function buildOrderText(order, statuses) {
   const date = new Date(order.created_at).toLocaleString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
   });
+
+  const productIds = Array.isArray(order.items) ? order.items.map((i) => i.id) : [];
+  const products = await getProductsByIds(productIds);
+  const productMap = {};
+  products.forEach((p) => { productMap[p.id] = p; });
 
   const allGiven =
     Array.isArray(order.items) &&
@@ -131,43 +153,180 @@ function formatOrderMessage(order, statuses = []) {
       statuses.find((s) => String(s.product_id) === String(item.id))?.given
     );
 
-  let msg = `${allGiven ? "✅" : "🛒"} *Заказ #${order.id.slice(0, 8)}*\n`;
+  let msg = `${allGiven ? "✅ Выдан" : "🛒 Заказ"}\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+  msg += `🆔 *#${order.id.slice(0, 8)}*\n`;
   msg += `📅 ${date}\n`;
   if (order.customer_phone) msg += `📱 ${order.customer_phone}\n`;
-  msg += `💰 Итого: *${order.total} USD*\n\n`;
+  msg += `💰 Итого: *${order.total} USD*\n`;
+  msg += `━━━━━━━━━━━━━━━━━━━━\n`;
   msg += `*Товары:*\n`;
 
   if (Array.isArray(order.items)) {
-    order.items.forEach((item, i) => {
+    order.items.forEach((item) => {
       const st = statuses.find((s) => String(s.product_id) === String(item.id));
-      const icon = st?.given ? "✅" : "⬜";
-      msg += `${icon} ${item.title} × ${item.quantity || 1} — ${item.price} USD\n`;
+      const given = st?.given || false;
+      const name = productMap[item.id]?.title || item.title || item.id;
+      const qty = item.quantity || 1;
+      msg += `${given ? "✅" : "⬜"} *${name}*\n`;
+      msg += `   ${qty} шт × ${item.price} USD\n`;
     });
   }
 
-  msg += `\n_Нажми на товар чтобы отметить как выданный_`;
+  msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+  msg += `_Нажми товар ниже чтобы отметить выданным_`;
   return msg;
 }
 
-function buildOrderKeyboard(order, statuses) {
+function buildOrderKeyboard(order, statuses, productMap = {}) {
   const buttons = [];
 
   if (Array.isArray(order.items)) {
     order.items.forEach((item) => {
       const st = statuses.find((s) => String(s.product_id) === String(item.id));
       const given = st?.given || false;
-      const label = `${given ? "✅" : "⬜"} ${item.title} × ${item.quantity || 1}`;
+      const name = (productMap[item.id]?.title || item.title || item.id).slice(0, 28);
       buttons.push([
-        Markup.button.callback(label, `tgl_${order.id}__${item.id}`),
+        Markup.button.callback(
+          `${given ? "✅" : "⬜"} ${name}`,
+          `tgl_${order.id}__${item.id}`
+        ),
       ]);
     });
   }
 
-  buttons.push([Markup.button.callback("🔙 К списку заказов", "orders_list")]);
+  buttons.push([
+    Markup.button.callback("🔙 К заказам", "orders_list"),
+    Markup.button.callback("🔄 Обновить", `order_${order.id}`),
+  ]);
+
   return Markup.inlineKeyboard(buttons);
 }
 
-// ─── Главный экспорт ────────────────────────────────────────────────────────
+// ─── Reply keyboard (постоянное меню) ────────────────────────────────────────
+
+const adminMainMenu = Markup.keyboard([
+  ["📦 Заказы", "📊 Статистика"],
+  ["🔄 Обновить"],
+]).resize();
+
+// ─── Логика показа списка заказов ─────────────────────────────────────────────
+
+async function showOrdersList(ctx, mode = "reply") {
+  const orders = await getOrders(30);
+
+  if (!Array.isArray(orders) || orders.length === 0) {
+    const text = "📭 *Заказов пока нет*\n\nКак только придёт первый заказ — ты получишь уведомление.";
+    if (mode === "edit") return ctx.editMessageText(text, { parse_mode: "Markdown" }).catch(() => ctx.reply(text, { parse_mode: "Markdown" }));
+    return ctx.reply(text, { parse_mode: "Markdown" });
+  }
+
+  const statusPromises = orders.map((o) => getOrderItemsStatus(o.id));
+  const allStatuses = await Promise.all(statusPromises);
+
+  const buttons = orders.map((o, i) => {
+    const statuses = allStatuses[i];
+    const date = new Date(o.created_at).toLocaleDateString("ru-RU");
+    const itemCount = Array.isArray(o.items) ? o.items.length : 0;
+    const givenCount = statuses.filter((s) => s.given).length;
+    const allDone = itemCount > 0 && givenCount === itemCount;
+    const icon = allDone ? "✅" : givenCount > 0 ? "🔄" : "🆕";
+
+    return [
+      Markup.button.callback(
+        `${icon} #${o.id.slice(0, 6)} | ${o.total}$ | ${givenCount}/${itemCount} тов | ${date}`,
+        `order_${o.id}`
+      ),
+    ];
+  });
+
+  buttons.push([Markup.button.callback("🔄 Обновить список", "orders_list")]);
+
+  const text = `📦 *Заказы* (последние ${orders.length})\n🆕 новый  🔄 частично выдан  ✅ полностью выдан`;
+
+  try {
+    if (mode === "edit") {
+      return ctx.editMessageText(text, {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard(buttons),
+      });
+    }
+    return ctx.reply(text, {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard(buttons),
+    });
+  } catch (e) {
+    console.log("showOrdersList error:", e.message);
+  }
+}
+
+// ─── Статистика ───────────────────────────────────────────────────────────────
+
+async function showStats(ctx, mode = "reply") {
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/orders?select=id,total,created_at,items`,
+      { headers }
+    );
+    const orders = await r.json().catch(() => []);
+
+    if (!Array.isArray(orders) || orders.length === 0) {
+      const text = "📊 *Статистика*\n\nЗаказов ещё нет.";
+      if (mode === "edit") return ctx.editMessageText(text, { parse_mode: "Markdown" }).catch(() => ctx.reply(text, { parse_mode: "Markdown" }));
+      return ctx.reply(text, { parse_mode: "Markdown" });
+    }
+
+    const total = orders.reduce((sum, o) => sum + (o.total || 0), 0);
+
+    const today = new Date().toLocaleDateString("ru-RU");
+    const todayOrders = orders.filter(
+      (o) => new Date(o.created_at).toLocaleDateString("ru-RU") === today
+    );
+    const todayTotal = todayOrders.reduce((sum, o) => sum + (o.total || 0), 0);
+
+    // Топ товары
+    const productCount = {};
+    orders.forEach((o) => {
+      if (Array.isArray(o.items)) {
+        o.items.forEach((item) => {
+          const key = item.title || item.id;
+          productCount[key] = (productCount[key] || 0) + (item.quantity || 1);
+        });
+      }
+    });
+
+    const topProducts = Object.entries(productCount)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+
+    let text = `📊 *Статистика*\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `📦 Всего заказов: *${orders.length}*\n`;
+    text += `💰 Общая выручка: *${total} USD*\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `🗓 Сегодня заказов: *${todayOrders.length}*\n`;
+    text += `💵 Сегодня выручка: *${todayTotal} USD*\n`;
+
+    if (topProducts.length > 0) {
+      text += `━━━━━━━━━━━━━━━━━━━━\n`;
+      text += `🏆 *Топ товары:*\n`;
+      topProducts.forEach(([name, count], i) => {
+        text += `${i + 1}. ${name} — ${count} шт\n`;
+      });
+    }
+
+    const kb = Markup.inlineKeyboard([
+      [Markup.button.callback("📦 К заказам", "orders_list")],
+    ]);
+
+    if (mode === "edit") return ctx.editMessageText(text, { parse_mode: "Markdown", ...kb }).catch(() => ctx.reply(text, { parse_mode: "Markdown", ...kb }));
+    return ctx.reply(text, { parse_mode: "Markdown", ...kb });
+  } catch (e) {
+    console.log("showStats error:", e);
+  }
+}
+
+// ─── startBot ─────────────────────────────────────────────────────────────────
 
 export async function startBot() {
   if (!process.env.BOT_TOKEN) throw new Error("BOT_TOKEN missing");
@@ -176,39 +335,64 @@ export async function startBot() {
 
   const bot = new Telegraf(process.env.BOT_TOKEN);
 
-  // ── /start ──────────────────────────────────────────────────────────────
-  bot.start((ctx) => {
+  // Команды в кнопке Menu
+  await bot.telegram.setMyCommands([
+    { command: "start", description: "🏠 Главное меню" },
+    { command: "orders", description: "📦 Список заказов" },
+    { command: "stats", description: "📊 Статистика" },
+  ]);
+
+  // ── /start ────────────────────────────────────────────────────────────────
+  bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
 
-    // Если уже авторизован как админ — сразу в панель
     if (adminSessions.has(ctx.from.id) && !sessionId) {
-      return ctx.reply("👑 *Админ панель*", {
+      return ctx.reply("👑 *Панель администратора*\nВыбери действие:", {
         parse_mode: "Markdown",
-        ...Markup.inlineKeyboard([[Markup.button.callback("📦 Заказы", "orders_list")]]),
+        ...adminMainMenu,
       });
     }
 
-    if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта.");
+    if (!sessionId) {
+      return ctx.reply("Открой бота по ссылке с сайта для авторизации.");
+    }
 
     sessions.set(ctx.from.id, sessionId);
     return ctx.reply(
-      "Нажми кнопку чтобы подтвердить номер телефона:",
+      "👋 Привет!\nНажми кнопку чтобы поделиться номером телефона:",
       Markup.keyboard([Markup.button.contactRequest("📱 Поделиться номером")]).resize()
     );
   });
 
-  // ── /admin — быстрый вход в панель если уже авторизован ─────────────────
-  bot.command("admin", async (ctx) => {
-    if (!adminSessions.has(ctx.from.id)) {
-      return ctx.reply("❌ У тебя нет доступа.");
-    }
-    return ctx.reply("👑 *Админ панель*", {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([[Markup.button.callback("📦 Заказы", "orders_list")]]),
-    });
+  // ── /orders ───────────────────────────────────────────────────────────────
+  bot.command("orders", async (ctx) => {
+    if (!adminSessions.has(ctx.from.id)) return ctx.reply("❌ Нет доступа.");
+    await showOrdersList(ctx, "reply");
   });
 
-  // ── Получение контакта ───────────────────────────────────────────────────
+  // ── /stats ────────────────────────────────────────────────────────────────
+  bot.command("stats", async (ctx) => {
+    if (!adminSessions.has(ctx.from.id)) return ctx.reply("❌ Нет доступа.");
+    await showStats(ctx, "reply");
+  });
+
+  // ── Reply кнопки ──────────────────────────────────────────────────────────
+  bot.hears("📦 Заказы", async (ctx) => {
+    if (!adminSessions.has(ctx.from.id)) return;
+    await showOrdersList(ctx, "reply");
+  });
+
+  bot.hears("📊 Статистика", async (ctx) => {
+    if (!adminSessions.has(ctx.from.id)) return;
+    await showStats(ctx, "reply");
+  });
+
+  bot.hears("🔄 Обновить", async (ctx) => {
+    if (!adminSessions.has(ctx.from.id)) return;
+    return ctx.reply("✅ Бот работает!", adminMainMenu);
+  });
+
+  // ── Контакт ───────────────────────────────────────────────────────────────
   bot.on("contact", async (ctx) => {
     const sessionId = sessions.get(ctx.from.id);
     if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта заново.");
@@ -220,8 +404,6 @@ export async function startBot() {
 
     const phone = normalizePhone(c.phone_number);
 
-    // Подтверждение верификации через сервер
-    let confirmOk = false;
     try {
       const r = await fetch(`${process.env.SERVER_URL}/confirm`, {
         method: "POST",
@@ -232,101 +414,66 @@ export async function startBot() {
         body: JSON.stringify({ sessionId, phone }),
       });
       const data = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        return ctx.reply(`❌ Ошибка верификации: ${data?.error || "confirm failed"}`);
-      }
-      confirmOk = true;
-    } catch (e) {
+      if (!r.ok) return ctx.reply(`❌ Ошибка: ${data?.error || "confirm failed"}`);
+    } catch {
       return ctx.reply("❌ Сервер недоступен.");
     }
 
-    if (!confirmOk) return;
-
-    // Убираем клавиатуру
-    await ctx.reply("✅ Номер подтверждён!", Markup.removeKeyboard());
-
-    // Проверяем — админ?
     console.log("Checking admin for phone:", phone);
     const admin = await isAdmin(phone);
     const backUrl = `${process.env.SITE_URL}/verify?sessionId=${sessionId}`;
+    sessions.delete(ctx.from.id);
 
     if (admin) {
       adminSessions.add(ctx.from.id);
-      sessions.delete(ctx.from.id);
-
-      return ctx.reply("👑 *Добро пожаловать, Администратор!*\n\nВыбери действие:", {
-        parse_mode: "Markdown",
-        ...Markup.inlineKeyboard([
-          [Markup.button.callback("📦 Заказы", "orders_list")],
-          [Markup.button.url("🌐 Перейти на сайт", backUrl)],
-        ]),
-      });
-    } else {
-      sessions.delete(ctx.from.id);
       return ctx.reply(
-        "Нажми чтобы вернуться на сайт:",
-        Markup.inlineKeyboard([[Markup.button.url("🚀 Вернуться на сайт", backUrl)]])
+        "👑 *Добро пожаловать, Администратор!*\nВыбери действие:",
+        { parse_mode: "Markdown", ...adminMainMenu }
+      );
+    } else {
+      return ctx.reply(
+        "✅ Номер подтверждён!\nМожешь вернуться на сайт:",
+        Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]])
       );
     }
   });
 
-  // ── Список заказов ────────────────────────────────────────────────────────
+  // ── Inline: список заказов ────────────────────────────────────────────────
   bot.action("orders_list", async (ctx) => {
     await ctx.answerCbQuery();
-
-    if (!adminSessions.has(ctx.from.id)) {
-      return ctx.answerCbQuery("❌ Нет доступа", { show_alert: true });
-    }
-
-    const orders = await getOrders(20);
-
-    if (!Array.isArray(orders) || orders.length === 0) {
-      return ctx.editMessageText("📭 Заказов пока нет.\n\nОбновить: нажми /admin", {
-        ...Markup.inlineKeyboard([[Markup.button.callback("🔄 Обновить", "orders_list")]]),
-      });
-    }
-
-    const buttons = orders.map((o) => {
-      const date = new Date(o.created_at).toLocaleDateString("ru-RU");
-      const label = `#${o.id.slice(0, 8)} | ${o.total} USD | ${date}`;
-      return [Markup.button.callback(label, `order_${o.id}`)];
-    });
-
-    buttons.push([Markup.button.callback("🔄 Обновить", "orders_list")]);
-
-    return ctx.editMessageText("📦 *Последние 20 заказов:*", {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard(buttons),
-    });
+    if (!adminSessions.has(ctx.from.id)) return;
+    await showOrdersList(ctx, "edit");
   });
 
-  // ── Открыть конкретный заказ ──────────────────────────────────────────────
+  // ── Inline: открыть заказ ─────────────────────────────────────────────────
   bot.action(/^order_(.+)$/, async (ctx) => {
     await ctx.answerCbQuery();
-
-    if (!adminSessions.has(ctx.from.id)) {
-      return ctx.answerCbQuery("❌ Нет доступа", { show_alert: true });
-    }
+    if (!adminSessions.has(ctx.from.id)) return;
 
     const orderId = ctx.match[1];
     const order = await getOrderById(orderId);
-    if (!order) {
-      return ctx.answerCbQuery("Заказ не найден", { show_alert: true });
-    }
+    if (!order) return ctx.answerCbQuery("❌ Заказ не найден", { show_alert: true });
 
     const statuses = await getOrderItemsStatus(orderId);
-    const msg = formatOrderMessage(order, statuses);
-    const kb = buildOrderKeyboard(order, statuses);
 
-    return ctx.editMessageText(msg, { parse_mode: "Markdown", ...kb });
+    // Загружаем продукты для клавиатуры
+    const productIds = Array.isArray(order.items) ? order.items.map((i) => i.id) : [];
+    const products = await getProductsByIds(productIds);
+    const productMap = {};
+    products.forEach((p) => { productMap[p.id] = p; });
+
+    const msg = await buildOrderText(order, statuses);
+    const kb = buildOrderKeyboard(order, statuses, productMap);
+
+    try {
+      await ctx.editMessageText(msg, { parse_mode: "Markdown", ...kb });
+    } catch {
+      await ctx.reply(msg, { parse_mode: "Markdown", ...kb });
+    }
   });
 
-  // ── Переключить статус товара (галочка) ───────────────────────────────────
-  // Callback data формат: tgl_{orderId}__{productId}
-  // Два подчёркивания как разделитель, т.к. orderId = UUID (содержит дефисы)
+  // ── Inline: галочка товара ────────────────────────────────────────────────
   bot.action(/^tgl_([0-9a-f-]+)__(.+)$/, async (ctx) => {
-    await ctx.answerCbQuery();
-
     if (!adminSessions.has(ctx.from.id)) {
       return ctx.answerCbQuery("❌ Нет доступа", { show_alert: true });
     }
@@ -334,64 +481,53 @@ export async function startBot() {
     const orderId = ctx.match[1];
     const productId = ctx.match[2];
 
-    // Получаем текущий статус
     const statuses = await getOrderItemsStatus(orderId);
     const current = statuses.find((s) => String(s.product_id) === String(productId));
     const newGiven = !(current?.given || false);
 
-    await toggleItemGiven(orderId, productId, newGiven);
+    await setItemGiven(orderId, productId, newGiven);
+    await ctx.answerCbQuery(newGiven ? "✅ Отмечен как выданный" : "↩️ Отметка снята");
 
-    // Обновляем сообщение
     const order = await getOrderById(orderId);
     if (!order) return;
 
     const newStatuses = await getOrderItemsStatus(orderId);
-    const msg = formatOrderMessage(order, newStatuses);
-    const kb = buildOrderKeyboard(order, newStatuses);
+    const productIds = Array.isArray(order.items) ? order.items.map((i) => i.id) : [];
+    const products = await getProductsByIds(productIds);
+    const productMap = {};
+    products.forEach((p) => { productMap[p.id] = p; });
 
-    await ctx.answerCbQuery(newGiven ? "✅ Отмечен как выданный" : "↩️ Отметка снята");
-    return ctx.editMessageText(msg, { parse_mode: "Markdown", ...kb });
+    const msg = await buildOrderText(order, newStatuses);
+    const kb = buildOrderKeyboard(order, newStatuses, productMap);
+
+    try {
+      await ctx.editMessageText(msg, { parse_mode: "Markdown", ...kb });
+    } catch (e) {
+      console.log("edit error:", e.message);
+    }
   });
 
-  // ── Уведомление о новом заказе (вызывается из index.js) ──────────────────
+  // ── Уведомление о новом заказе ────────────────────────────────────────────
   bot.notifyAdmins = async (order) => {
-    try {
-      // Получаем всех админов из Supabase
-      const r = await fetch(
-        `${SUPABASE_URL}/rest/v1/admins_phones_numbers?select=phone`,
-        { headers }
-      );
-      const admins = await r.json().catch(() => []);
+    const adminTgIds = [...adminSessions];
+    if (adminTgIds.length === 0) {
+      console.log("No active admin sessions to notify");
+      return;
+    }
 
-      // Находим tgId всех текущих сессий-админов
-      const adminTgIds = [...adminSessions];
+    const msg = await buildOrderText(order, []);
 
-      if (adminTgIds.length === 0) {
-        console.log("No active admin sessions to notify");
-        return;
+    for (const tgId of adminTgIds) {
+      try {
+        await bot.telegram.sendMessage(tgId, `🔔 *Новый заказ!*\n\n${msg}`, {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("📋 Открыть заказ", `order_${order.id}`)],
+          ]),
+        });
+      } catch (e) {
+        console.log(`Failed to notify admin ${tgId}:`, e.message);
       }
-
-      const msg =
-        `🔔 *Новый заказ!*\n\n` +
-        formatOrderMessage(order, []).replace(
-          "_Нажми на товар чтобы отметить как выданный_",
-          ""
-        );
-
-      for (const tgId of adminTgIds) {
-        try {
-          await bot.telegram.sendMessage(tgId, msg, {
-            parse_mode: "Markdown",
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback("📋 Открыть заказ", `order_${order.id}`)],
-            ]),
-          });
-        } catch (e) {
-          console.log(`Failed to notify admin ${tgId}:`, e.message);
-        }
-      }
-    } catch (e) {
-      console.log("notifyAdmins error:", e);
     }
   };
 
