@@ -14,6 +14,7 @@ console.log({
 });
 
 const app = express();
+
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
@@ -21,6 +22,7 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
@@ -46,18 +48,19 @@ let botInstance = null;
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("OK"));
 
+// ─── UptimeRobot ping (чтобы Render не засыпал) ───────────────────────────────
+app.get("/ping", (req, res) => {
+  console.log("🏓 Ping:", new Date().toLocaleTimeString("ru-RU"));
+  res.json({ status: "ok", uptime: Math.floor(process.uptime()), time: new Date() });
+});
+
 // ─── Начать верификацию ───────────────────────────────────────────────────────
-// POST /start-verify  { phone }
-// Создаёт запись в phone_verifications с secret_code
-// Возвращает { sessionId, secretCode, tgLink }
 app.post("/start-verify", async (req, res) => {
   try {
     const { phone } = req.body || {};
     if (!phone) return res.status(400).json({ error: "Phone required" });
 
     const expectedPhone = normalizePhone(phone);
-
-    // Генерируем 6-значный код
     const secretCode = String(Math.floor(100000 + Math.random() * 900000));
 
     const r = await fetch(`${SUPABASE_URL}/rest/v1/phone_verifications`, {
@@ -72,12 +75,11 @@ app.post("/start-verify", async (req, res) => {
     if (!r.ok) return res.status(400).json({ error: data });
 
     const sessionId = data?.[0]?.id;
-    if (!sessionId)
-      return res.status(500).json({ error: "No sessionId returned" });
+    if (!sessionId) return res.status(500).json({ error: "No sessionId returned" });
 
     res.json({
       sessionId,
-      secretCode, // фронт показывает пользователю
+      secretCode,
       tgLink: `https://t.me/${process.env.BOT_USERNAME}?start=${sessionId}`,
     });
   } catch (err) {
@@ -87,8 +89,6 @@ app.post("/start-verify", async (req, res) => {
 });
 
 // ─── Подтвердить номер (вызывается из бота) ───────────────────────────────────
-// POST /confirm  { sessionId, phone, code }
-// Защищён x-bot-secret
 app.post("/confirm", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
@@ -103,7 +103,6 @@ app.post("/confirm", async (req, res) => {
 
     const incomingPhone = normalizePhone(phone);
 
-    // Получаем сессию из Supabase
     const rr = await fetch(
       `${SUPABASE_URL}/rest/v1/phone_verifications?id=eq.${sessionId}&select=id,phone,verified,secret_code`,
       { headers }
@@ -114,7 +113,6 @@ app.post("/confirm", async (req, res) => {
     const row = rows?.[0];
     if (!row) return res.status(404).json({ error: "Session not found" });
 
-    // Проверяем телефон
     if (normalizePhone(row.phone) !== incomingPhone) {
       return res.status(400).json({
         error: "Phone mismatch",
@@ -123,12 +121,10 @@ app.post("/confirm", async (req, res) => {
       });
     }
 
-    // Проверяем код (если он был сохранён)
     if (row.secret_code && code && String(row.secret_code) !== String(code)) {
       return res.status(400).json({ error: "Wrong code" });
     }
 
-    // Отмечаем как подтверждённый
     const upd = await fetch(
       `${SUPABASE_URL}/rest/v1/phone_verifications?id=eq.${sessionId}`,
       {
@@ -151,8 +147,6 @@ app.post("/confirm", async (req, res) => {
 });
 
 // ─── Статус верификации ───────────────────────────────────────────────────────
-// GET /status/:id?code=XXXXXX
-// Возвращает { verified: bool }
 app.get("/status/:id", async (req, res) => {
   try {
     const { code } = req.query;
@@ -167,7 +161,6 @@ app.get("/status/:id", async (req, res) => {
     const row = data?.[0];
     if (!row) return res.status(404).json({ error: "Session not found" });
 
-    // Проверяем код если передан
     if (code && row.secret_code && String(row.secret_code) !== String(code)) {
       return res.status(403).json({ error: "Wrong code" });
     }
@@ -180,8 +173,6 @@ app.get("/status/:id", async (req, res) => {
 });
 
 // ─── Создать заказ ────────────────────────────────────────────────────────────
-// POST /order  { customer_phone, total, items }
-// Защищён x-bot-secret
 app.post("/order", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
@@ -203,9 +194,7 @@ app.post("/order", async (req, res) => {
       headers: { ...headers, Prefer: "return=representation" },
       body: JSON.stringify([
         {
-          customer_phone: customer_phone
-            ? normalizePhone(customer_phone)
-            : null,
+          customer_phone: customer_phone ? normalizePhone(customer_phone) : null,
           total,
           items,
         },
@@ -219,9 +208,7 @@ app.post("/order", async (req, res) => {
     if (!order) return res.status(500).json({ error: "Order not saved" });
 
     if (botInstance?.notifyAdmins) {
-      botInstance
-        .notifyAdmins(order)
-        .catch((e) => console.log("Notify error:", e));
+      botInstance.notifyAdmins(order).catch((e) => console.log("Notify error:", e));
     }
 
     res.json({ ok: true, orderId: order.id });
@@ -231,7 +218,7 @@ app.post("/order", async (req, res) => {
   }
 });
 
-// ─── Список заказов (для фронта/бота) ────────────────────────────────────────
+// ─── Список заказов ───────────────────────────────────────────────────────────
 app.get("/orders", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
