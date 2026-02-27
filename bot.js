@@ -2,8 +2,9 @@ import { Telegraf, Markup } from "telegraf";
 import dotenv from "dotenv";
 dotenv.config();
 
-const sessions = new Map(); // tgId -> sessionId
-const adminSessions = new Set(); // tgId тех кто авторизован как админ
+const sessions = new Map();     // tgId -> sessionId
+const pendingCode = new Map();  // tgId -> { sessionId, phone }  ← NEW
+const adminSessions = new Set();
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -36,11 +37,14 @@ async function isAdmin(phone) {
     console.log("Checking phone:", phone);
 
     return data.some((row) => {
-      const stored = typeof row.phone === "string"
-        ? row.phone.replace(/^"|"$/g, "").trim()
-        : String(row.phone).trim();
+      const stored =
+        typeof row.phone === "string"
+          ? row.phone.replace(/^"|"$/g, "").trim()
+          : String(row.phone).trim();
       const match = normalizePhone(stored) === normalizePhone(phone);
-      console.log(`Compare: "${normalizePhone(stored)}" === "${normalizePhone(phone)}" -> ${match}`);
+      console.log(
+        `Compare: "${normalizePhone(stored)}" === "${normalizePhone(phone)}" -> ${match}`
+      );
       return match;
     });
   } catch (e) {
@@ -104,11 +108,16 @@ async function getOrderItemsStatus(orderId) {
 async function setItemGiven(orderId, productId, newGiven) {
   await fetch(`${SUPABASE_URL}/rest/v1/order_items_status`, {
     method: "POST",
-    headers: { ...headers, Prefer: "resolution=merge-duplicates,return=representation" },
-    body: JSON.stringify([{ order_id: orderId, product_id: productId, given: newGiven }]),
+    headers: {
+      ...headers,
+      Prefer: "resolution=merge-duplicates,return=representation",
+    },
+    body: JSON.stringify([
+      { order_id: orderId, product_id: productId, given: newGiven },
+    ]),
   });
 
-  if (!newGiven) return; // снятие галочки — не трогаем stock
+  if (!newGiven) return;
 
   try {
     const order = await getOrderById(orderId);
@@ -137,14 +146,21 @@ async function setItemGiven(orderId, productId, newGiven) {
 
 async function buildOrderText(order, statuses) {
   const date = new Date(order.created_at).toLocaleString("ru-RU", {
-    day: "2-digit", month: "2-digit", year: "numeric",
-    hour: "2-digit", minute: "2-digit",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 
-  const productIds = Array.isArray(order.items) ? order.items.map((i) => i.id) : [];
+  const productIds = Array.isArray(order.items)
+    ? order.items.map((i) => i.id)
+    : [];
   const products = await getProductsByIds(productIds);
   const productMap = {};
-  products.forEach((p) => { productMap[p.id] = p; });
+  products.forEach((p) => {
+    productMap[p.id] = p;
+  });
 
   const allGiven =
     Array.isArray(order.items) &&
@@ -164,7 +180,9 @@ async function buildOrderText(order, statuses) {
 
   if (Array.isArray(order.items)) {
     order.items.forEach((item) => {
-      const st = statuses.find((s) => String(s.product_id) === String(item.id));
+      const st = statuses.find(
+        (s) => String(s.product_id) === String(item.id)
+      );
       const given = st?.given || false;
       const name = productMap[item.id]?.title || item.title || item.id;
       const qty = item.quantity || 1;
@@ -183,9 +201,15 @@ function buildOrderKeyboard(order, statuses, productMap = {}) {
 
   if (Array.isArray(order.items)) {
     order.items.forEach((item) => {
-      const st = statuses.find((s) => String(s.product_id) === String(item.id));
+      const st = statuses.find(
+        (s) => String(s.product_id) === String(item.id)
+      );
       const given = st?.given || false;
-      const name = (productMap[item.id]?.title || item.title || item.id).slice(0, 28);
+      const name = (
+        productMap[item.id]?.title ||
+        item.title ||
+        item.id
+      ).slice(0, 28);
       buttons.push([
         Markup.button.callback(
           `${given ? "✅" : "⬜"} ${name}`,
@@ -203,21 +227,25 @@ function buildOrderKeyboard(order, statuses, productMap = {}) {
   return Markup.inlineKeyboard(buttons);
 }
 
-// ─── Reply keyboard (постоянное меню) ────────────────────────────────────────
+// ─── Reply keyboard ───────────────────────────────────────────────────────────
 
 const adminMainMenu = Markup.keyboard([
   ["📦 Заказы", "📊 Статистика"],
   ["🔄 Обновить"],
 ]).resize();
 
-// ─── Логика показа списка заказов ─────────────────────────────────────────────
+// ─── Список заказов ───────────────────────────────────────────────────────────
 
 async function showOrdersList(ctx, mode = "reply") {
   const orders = await getOrders(30);
 
   if (!Array.isArray(orders) || orders.length === 0) {
-    const text = "📭 *Заказов пока нет*\n\nКак только придёт первый заказ — ты получишь уведомление.";
-    if (mode === "edit") return ctx.editMessageText(text, { parse_mode: "Markdown" }).catch(() => ctx.reply(text, { parse_mode: "Markdown" }));
+    const text =
+      "📭 *Заказов пока нет*\n\nКак только придёт первый заказ — ты получишь уведомление.";
+    if (mode === "edit")
+      return ctx
+        .editMessageText(text, { parse_mode: "Markdown" })
+        .catch(() => ctx.reply(text, { parse_mode: "Markdown" }));
     return ctx.reply(text, { parse_mode: "Markdown" });
   }
 
@@ -272,19 +300,20 @@ async function showStats(ctx, mode = "reply") {
 
     if (!Array.isArray(orders) || orders.length === 0) {
       const text = "📊 *Статистика*\n\nЗаказов ещё нет.";
-      if (mode === "edit") return ctx.editMessageText(text, { parse_mode: "Markdown" }).catch(() => ctx.reply(text, { parse_mode: "Markdown" }));
+      if (mode === "edit")
+        return ctx
+          .editMessageText(text, { parse_mode: "Markdown" })
+          .catch(() => ctx.reply(text, { parse_mode: "Markdown" }));
       return ctx.reply(text, { parse_mode: "Markdown" });
     }
 
     const total = orders.reduce((sum, o) => sum + (o.total || 0), 0);
-
     const today = new Date().toLocaleDateString("ru-RU");
     const todayOrders = orders.filter(
       (o) => new Date(o.created_at).toLocaleDateString("ru-RU") === today
     );
     const todayTotal = todayOrders.reduce((sum, o) => sum + (o.total || 0), 0);
 
-    // Топ товары
     const productCount = {};
     orders.forEach((o) => {
       if (Array.isArray(o.items)) {
@@ -319,7 +348,10 @@ async function showStats(ctx, mode = "reply") {
       [Markup.button.callback("📦 К заказам", "orders_list")],
     ]);
 
-    if (mode === "edit") return ctx.editMessageText(text, { parse_mode: "Markdown", ...kb }).catch(() => ctx.reply(text, { parse_mode: "Markdown", ...kb }));
+    if (mode === "edit")
+      return ctx
+        .editMessageText(text, { parse_mode: "Markdown", ...kb })
+        .catch(() => ctx.reply(text, { parse_mode: "Markdown", ...kb }));
     return ctx.reply(text, { parse_mode: "Markdown", ...kb });
   } catch (e) {
     console.log("showStats error:", e);
@@ -335,7 +367,6 @@ export async function startBot() {
 
   const bot = new Telegraf(process.env.BOT_TOKEN);
 
-  // Команды в кнопке Menu
   await bot.telegram.setMyCommands([
     { command: "start", description: "🏠 Главное меню" },
     { command: "orders", description: "📦 Список заказов" },
@@ -360,7 +391,9 @@ export async function startBot() {
     sessions.set(ctx.from.id, sessionId);
     return ctx.reply(
       "👋 Привет!\nНажми кнопку чтобы поделиться номером телефона:",
-      Markup.keyboard([Markup.button.contactRequest("📱 Поделиться номером")]).resize()
+      Markup.keyboard([
+        Markup.button.contactRequest("📱 Поделиться номером"),
+      ]).resize()
     );
   });
 
@@ -392,7 +425,7 @@ export async function startBot() {
     return ctx.reply("✅ Бот работает!", adminMainMenu);
   });
 
-  // ── Контакт ───────────────────────────────────────────────────────────────
+  // ── Контакт ── получаем телефон, ждём код ────────────────────────────────
   bot.on("contact", async (ctx) => {
     const sessionId = sessions.get(ctx.from.id);
     if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта заново.");
@@ -404,6 +437,34 @@ export async function startBot() {
 
     const phone = normalizePhone(c.phone_number);
 
+    // Сохраняем данные и ждём код от пользователя
+    pendingCode.set(ctx.from.id, { sessionId, phone });
+    sessions.delete(ctx.from.id);
+
+    return ctx.reply(
+      "✅ Номер получен!\n\nТеперь введи *6-значный код* с сайта:",
+      { parse_mode: "Markdown", ...Markup.removeKeyboard() }
+    );
+  });
+
+  // ── Текст — ловим 6-значный код ───────────────────────────────────────────
+  bot.on("text", async (ctx) => {
+    // Пропускаем команды и reply-кнопки
+    const text = ctx.message.text?.trim();
+    if (!text || text.startsWith("/")) return;
+
+    // Если это reply-кнопка администратора — не обрабатываем как код
+    if (["📦 Заказы", "📊 Статистика", "🔄 Обновить"].includes(text)) return;
+
+    const pending = pendingCode.get(ctx.from.id);
+    if (!pending) return; // не ждём кода от этого юзера
+
+    if (!/^\d{6}$/.test(text)) {
+      return ctx.reply("Введи ровно 6 цифр. Попробуй ещё раз.");
+    }
+
+    const { sessionId, phone } = pending;
+
     try {
       const r = await fetch(`${process.env.SERVER_URL}/confirm`, {
         method: "POST",
@@ -411,18 +472,25 @@ export async function startBot() {
           "Content-Type": "application/json",
           "x-bot-secret": process.env.BOT_SECRET,
         },
-        body: JSON.stringify({ sessionId, phone }),
+        body: JSON.stringify({ sessionId, phone, code: text }),
       });
       const data = await r.json().catch(() => ({}));
-      if (!r.ok) return ctx.reply(`❌ Ошибка: ${data?.error || "confirm failed"}`);
+
+      if (!r.ok) {
+        if (data?.error === "Wrong code") {
+          return ctx.reply("❌ Неверный код. Посмотри код на сайте и попробуй ещё раз.");
+        }
+        return ctx.reply(`❌ Ошибка: ${data?.error || "confirm failed"}`);
+      }
     } catch {
-      return ctx.reply("❌ Сервер недоступен.");
+      return ctx.reply("❌ Сервер недоступен. Попробуй позже.");
     }
+
+    pendingCode.delete(ctx.from.id);
 
     console.log("Checking admin for phone:", phone);
     const admin = await isAdmin(phone);
     const backUrl = `${process.env.SITE_URL}/verify?sessionId=${sessionId}`;
-    sessions.delete(ctx.from.id);
 
     if (admin) {
       adminSessions.add(ctx.from.id);
@@ -430,12 +498,12 @@ export async function startBot() {
         "👑 *Добро пожаловать, Администратор!*\nВыбери действие:",
         { parse_mode: "Markdown", ...adminMainMenu }
       );
-    } else {
-      return ctx.reply(
-        "✅ Номер подтверждён!\nМожешь вернуться на сайт:",
-        Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]])
-      );
     }
+
+    return ctx.reply(
+      "✅ Номер подтверждён!\nМожешь вернуться на сайт:",
+      Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]])
+    );
   });
 
   // ── Inline: список заказов ────────────────────────────────────────────────
@@ -452,15 +520,18 @@ export async function startBot() {
 
     const orderId = ctx.match[1];
     const order = await getOrderById(orderId);
-    if (!order) return ctx.answerCbQuery("❌ Заказ не найден", { show_alert: true });
+    if (!order)
+      return ctx.answerCbQuery("❌ Заказ не найден", { show_alert: true });
 
     const statuses = await getOrderItemsStatus(orderId);
-
-    // Загружаем продукты для клавиатуры
-    const productIds = Array.isArray(order.items) ? order.items.map((i) => i.id) : [];
+    const productIds = Array.isArray(order.items)
+      ? order.items.map((i) => i.id)
+      : [];
     const products = await getProductsByIds(productIds);
     const productMap = {};
-    products.forEach((p) => { productMap[p.id] = p; });
+    products.forEach((p) => {
+      productMap[p.id] = p;
+    });
 
     const msg = await buildOrderText(order, statuses);
     const kb = buildOrderKeyboard(order, statuses, productMap);
@@ -482,20 +553,28 @@ export async function startBot() {
     const productId = ctx.match[2];
 
     const statuses = await getOrderItemsStatus(orderId);
-    const current = statuses.find((s) => String(s.product_id) === String(productId));
+    const current = statuses.find(
+      (s) => String(s.product_id) === String(productId)
+    );
     const newGiven = !(current?.given || false);
 
     await setItemGiven(orderId, productId, newGiven);
-    await ctx.answerCbQuery(newGiven ? "✅ Отмечен как выданный" : "↩️ Отметка снята");
+    await ctx.answerCbQuery(
+      newGiven ? "✅ Отмечен как выданный" : "↩️ Отметка снята"
+    );
 
     const order = await getOrderById(orderId);
     if (!order) return;
 
     const newStatuses = await getOrderItemsStatus(orderId);
-    const productIds = Array.isArray(order.items) ? order.items.map((i) => i.id) : [];
+    const productIds = Array.isArray(order.items)
+      ? order.items.map((i) => i.id)
+      : [];
     const products = await getProductsByIds(productIds);
     const productMap = {};
-    products.forEach((p) => { productMap[p.id] = p; });
+    products.forEach((p) => {
+      productMap[p.id] = p;
+    });
 
     const msg = await buildOrderText(order, newStatuses);
     const kb = buildOrderKeyboard(order, newStatuses, productMap);
@@ -522,7 +601,12 @@ export async function startBot() {
         await bot.telegram.sendMessage(tgId, `🔔 *Новый заказ!*\n\n${msg}`, {
           parse_mode: "Markdown",
           ...Markup.inlineKeyboard([
-            [Markup.button.callback("📋 Открыть заказ", `order_${order.id}`)],
+            [
+              Markup.button.callback(
+                "📋 Открыть заказ",
+                `order_${order.id}`
+              ),
+            ],
           ]),
         });
       } catch (e) {
