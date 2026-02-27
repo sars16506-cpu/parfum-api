@@ -48,10 +48,39 @@ let botInstance = null;
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("OK"));
 
-// ─── UptimeRobot ping (чтобы Render не засыпал) ───────────────────────────────
+// ─── UptimeRobot ping ─────────────────────────────────────────────────────────
 app.get("/ping", (req, res) => {
   console.log("🏓 Ping:", new Date().toLocaleTimeString("ru-RU"));
   res.json({ status: "ok", uptime: Math.floor(process.uptime()), time: new Date() });
+});
+
+// ─── Проверить является ли номер админом ─────────────────────────────────────
+app.get("/is-admin", async (req, res) => {
+  try {
+    const { phone } = req.query;
+    if (!phone) return res.json({ isAdmin: false });
+
+    const normalized = normalizePhone(phone);
+
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/admins_phones_numbers?select=phone`,
+      { headers }
+    );
+    const data = await r.json().catch(() => []);
+    if (!Array.isArray(data)) return res.json({ isAdmin: false });
+
+    const isAdmin = data.some((row) => {
+      const stored = typeof row.phone === "string"
+        ? row.phone.replace(/^"|"$/g, "").trim()
+        : String(row.phone).trim();
+      return normalizePhone(stored) === normalized;
+    });
+
+    res.json({ isAdmin });
+  } catch (err) {
+    console.log("IS-ADMIN ERROR:", err);
+    res.json({ isAdmin: false });
+  }
 });
 
 // ─── Начать верификацию ───────────────────────────────────────────────────────
