@@ -126,7 +126,6 @@ async function setItemGiven(orderId, productId, newGiven) {
     const order = await getOrderById(orderId);
     const items = Array.isArray(order?.items) ? order.items : [];
 
-    // поддержка старых заказов (если где-то было id вместо product_id)
     const item = items.find(
       (i) => String(i.product_id ?? i.id) === String(productId)
     );
@@ -225,8 +224,7 @@ async function buildOrdersListContent() {
     const date = formatDateShort(o.created_at);
     const label = `${icon} #${o.id.slice(0, 6)} · ${o.total} ${cur} · ${givenCount}/${itemCount} · ${date}`;
 
-    // ВАЖНО: callback_data = o_<uuid>
-    return [Markup.button.callback(label, `o_${o.id}`)];
+    return [Markup.button.callback(label, `order_${o.id}`)];
   });
 
   buttons.push([
@@ -293,14 +291,14 @@ async function buildOrderContent(orderId) {
     return [
       Markup.button.callback(
         `${given ? "✅" : "⬜️"} ${name}${ml ? ` · ${ml}ml` : ""}`,
-        `tgl_${order.id}__${pid}`
+        `tgl_${order.id}_${pid}`
       ),
     ];
   });
 
   buttons.push([
     Markup.button.callback("◀️ К заказам", "orders_list"),
-    Markup.button.callback("🔄", `o_${order.id}`),
+    Markup.button.callback("🔄", `order_${order.id}`),
   ]);
 
   return { text, kb: Markup.inlineKeyboard(buttons) };
@@ -408,7 +406,6 @@ export async function startBot() {
     { command: "stats", description: "📊 Статистика" },
   ]);
 
-  // ✅ ВАЖНО: правильно прикрепляем inline keyboard через reply_markup
   async function updatePanel(ctx, buildFn, ...args) {
     await ctx.answerCbQuery().catch(() => { });
     if (!adminSessions.has(ctx.from.id)) return;
@@ -457,7 +454,6 @@ export async function startBot() {
       }
     }
 
-    // ✅ ТОЛЬКО inline keyboard
     const sent = await ctx.reply(text, {
       parse_mode: "Markdown",
       reply_markup: kb.reply_markup,
@@ -468,6 +464,7 @@ export async function startBot() {
       messageId: sent.message_id,
     });
   }
+
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
 
@@ -588,19 +585,23 @@ export async function startBot() {
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
   bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
 
-  // открыть заказ
-  bot.action(/^o_([0-9a-f-]{36})$/i, (ctx) =>
-    updatePanel(ctx, buildOrderContent, ctx.match[1])
-  );
+  // ✅ ФИКС: правильная регулярка для UUID в callback_data
+  // было: o_<uuid> — теперь: order_<uuid>
+  bot.action(/^order_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i, (ctx) => {
+    console.log("ORDER ACTION matched:", ctx.match[1]);
+    return updatePanel(ctx, buildOrderContent, ctx.match[1]);
+  });
 
-  // тумблер товара
-  bot.action(/^tgl_([0-9a-f-]{36})__([0-9a-f-]{36})$/i, async (ctx) => {
+  // ✅ ФИКС: разделитель __ заменён на _ чтобы не конфликтовал с UUID
+  bot.action(/^tgl_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i, async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) {
       return ctx.answerCbQuery("❌ Нет доступа", { show_alert: true });
     }
 
     const orderId = ctx.match[1];
     const productId = ctx.match[2];
+
+    console.log("TGL ACTION matched:", orderId, productId);
 
     const statuses = await getOrderItemsStatus(orderId);
     const current = statuses.find((s) => String(s.product_id) === String(productId));
@@ -640,7 +641,7 @@ export async function startBot() {
       `💰 *Итого: ${order.total} ${cur}*`;
 
     const kb = Markup.inlineKeyboard([
-      [Markup.button.callback("📋 Открыть заказ", `o_${order.id}`)],
+      [Markup.button.callback("📋 Открыть заказ", `order_${order.id}`)],
     ]);
 
     for (const tgId of adminTgIds) {
@@ -660,7 +661,7 @@ export async function startBot() {
   } catch (e) {
     const msg = e?.response?.description || e?.message || String(e);
     console.log("❌ BOT LAUNCH ERROR:", msg);
-    if (String(msg).includes("409")) return bot; // уже запущен
+    if (String(msg).includes("409")) return bot;
     throw e;
   }
 
