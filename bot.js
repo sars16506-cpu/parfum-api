@@ -27,21 +27,17 @@ const normalizePhone = (p = "") => {
 
 async function isAdmin(phone) {
   try {
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/admins_phones_numbers?select=phone`,
-      { headers }
-    );
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/admins_phones_numbers?select=phone`, { headers });
     const data = await r.json().catch(() => []);
     if (!Array.isArray(data)) return false;
     return data.some((row) => {
-      const stored =
-        typeof row.phone === "string"
-          ? row.phone.replace(/^"|"$/g, "").trim()
-          : String(row.phone).trim();
+      const stored = typeof row.phone === "string"
+        ? row.phone.replace(/^"|"$/g, "").trim()
+        : String(row.phone).trim();
       return normalizePhone(stored) === normalizePhone(phone);
     });
   } catch (e) {
-    console.log("isAdmin error:", e);
+    console.error("isAdmin error:", e);
     return false;
   }
 }
@@ -59,52 +55,70 @@ function formatDateShort(iso) {
   });
 }
 
-// ─── Supabase ─────────────────────────────────────────────────────────────────
+// ─── Supabase helpers ─────────────────────────────────────────────────────────
 
 async function getOrders(limit = 30) {
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=${limit}&select=*`,
-    { headers }
-  );
-  return r.json().catch(() => []);
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=${limit}&select=*`,
+      { headers }
+    );
+    const data = await r.json().catch(() => []);
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("getOrders error:", e);
+    return [];
+  }
 }
 
 async function getOrderById(orderId) {
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/orders?id=eq.${orderId}&select=*`,
-    { headers }
-  );
-  const data = await r.json().catch(() => []);
-  return data?.[0] || null;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/orders?id=eq.${orderId}&select=*`, { headers });
+    const data = await r.json().catch(() => []);
+    return Array.isArray(data) ? data[0] || null : null;
+  } catch (e) {
+    console.error("getOrderById error:", e);
+    return null;
+  }
 }
 
 async function getOrderItemsStatus(orderId) {
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/order_items_status?order_id=eq.${orderId}`,
-    { headers }
-  );
-  return r.json().catch(() => []);
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/order_items_status?order_id=eq.${orderId}`,
+      { headers }
+    );
+    const data = await r.json().catch(() => []);
+    return Array.isArray(data) ? data : [];
+  } catch (e) {
+    console.error("getOrderItemsStatus error:", e);
+    return [];
+  }
 }
 
+// Отметить товар выданным и уменьшить остаток на складе
 async function setItemGiven(orderId, productId, newGiven) {
-  await fetch(`${SUPABASE_URL}/rest/v1/order_items_status`, {
-    method: "POST",
-    headers: {
-      ...headers,
-      Prefer: "resolution=merge-duplicates,return=representation",
-    },
-    body: JSON.stringify([
-      { order_id: orderId, product_id: productId, given: newGiven },
-    ]),
-  });
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/order_items_status`, {
+      method: "POST",
+      headers: { ...headers, Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify([{ order_id: orderId, product_id: productId, given: newGiven }]),
+    });
+  } catch (e) {
+    console.error("setItemGiven upsert error:", e);
+  }
 
+  // Уменьшаем остаток только при выдаче (не при отмене)
   if (!newGiven) return;
 
   try {
     const order = await getOrderById(orderId);
     if (!order?.items) return;
-    const item = order.items.find((i) => String(i.id) === String(productId));
+
+    // product_id — теперь правильное поле
+    const item = order.items.find((i) => String(i.product_id) === String(productId));
     if (!item) return;
+
     const qty = item.quantity || 1;
 
     const rp = await fetch(
@@ -112,7 +126,7 @@ async function setItemGiven(orderId, productId, newGiven) {
       { headers }
     );
     const products = await rp.json().catch(() => []);
-    const product = products?.[0];
+    const product = Array.isArray(products) ? products[0] : null;
     if (!product) return;
 
     const newLeft = Math.max(0, (product.item_left || 0) - qty);
@@ -122,7 +136,7 @@ async function setItemGiven(orderId, productId, newGiven) {
       body: JSON.stringify({ item_left: newLeft }),
     });
   } catch (e) {
-    console.log("setItemGiven error:", e);
+    console.error("setItemGiven stock error:", e);
   }
 }
 
@@ -132,33 +146,28 @@ function buildMainMenuContent() {
   const now = new Date().toLocaleString("ru-RU", {
     day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
   });
-  const text = `👑 *Панель администратора*\n_Обновлено: ${now}_`;
-  const kb = Markup.inlineKeyboard([
-    [
-      Markup.button.callback("📦 Заказы", "orders_list"),
-      Markup.button.callback("📊 Статистика", "stats"),
-    ],
-    [Markup.button.callback("🔄 Обновить", "main_menu")],
-  ]);
-  return { text, kb };
+  return {
+    text: `👑 *Панель администратора*\n_Обновлено: ${now}_`,
+    kb: Markup.inlineKeyboard([
+      [Markup.button.callback("📦 Заказы", "orders_list"), Markup.button.callback("📊 Статистика", "stats")],
+      [Markup.button.callback("🔄 Обновить", "main_menu")],
+    ]),
+  };
 }
 
 async function buildOrdersListContent() {
   const orders = await getOrders(30);
 
-  if (!Array.isArray(orders) || orders.length === 0) {
-    const text = `📦 *Заказы*\n\n📭 Заказов пока нет.\n_Как только придёт первый — ты получишь уведомление._`;
-    const kb = Markup.inlineKeyboard([
-      [
-        Markup.button.callback("🔄 Обновить", "orders_list"),
-        Markup.button.callback("🏠 Меню", "main_menu"),
-      ],
-    ]);
-    return { text, kb };
+  if (orders.length === 0) {
+    return {
+      text: `📦 *Заказы*\n\n📭 Заказов пока нет.\n_Как только придёт первый — ты получишь уведомление._`,
+      kb: Markup.inlineKeyboard([
+        [Markup.button.callback("🔄 Обновить", "orders_list"), Markup.button.callback("🏠 Меню", "main_menu")],
+      ]),
+    };
   }
 
-  const statusPromises = orders.map((o) => getOrderItemsStatus(o.id));
-  const allStatuses = await Promise.all(statusPromises);
+  const allStatuses = await Promise.all(orders.map((o) => getOrderItemsStatus(o.id)));
 
   const totalNew = allStatuses.filter((st, i) => {
     const items = Array.isArray(orders[i].items) ? orders[i].items : [];
@@ -171,8 +180,7 @@ async function buildOrdersListContent() {
 
   let text = `📦 *Заказы* — последние ${orders.length}\n`;
   text += `🆕 новых: *${totalNew}*  ✅ выдано: *${totalDone}*\n`;
-  text += `─────────────────────\n`;
-  text += `_Выбери заказ:_`;
+  text += `─────────────────────\n_Выбери заказ:_`;
 
   const buttons = orders.map((o, i) => {
     const statuses = allStatuses[i];
@@ -183,12 +191,8 @@ async function buildOrdersListContent() {
     const partial = givenCount > 0 && !allDone;
     const icon = allDone ? "✅" : partial ? "🔄" : "🆕";
     const date = formatDateShort(o.created_at);
-
-    // ✅ ФИКС: убрали телефон из кнопки — текст теперь короткий и не крашит бота
-    const shortId = o.id.slice(0, 6);
-    const total = String(o.total ?? 0).slice(0, 8);
-    const label = `${icon} #${shortId} · ${total}$ · ${givenCount}/${itemCount} · ${date}`;
-
+    // Короткий текст — не превышаем лимит Telegram 64 байта
+    const label = `${icon} #${o.id.slice(0, 6)} · ${o.total}${o.valute ? " " + o.valute : "$"} · ${givenCount}/${itemCount} · ${date}`;
     return [Markup.button.callback(label, `o_${o.id}`)];
   });
 
@@ -208,7 +212,6 @@ async function buildOrderContent(orderId) {
   const items = Array.isArray(order.items) ? order.items : [];
   const givenCount = statuses.filter((s) => s.given).length;
   const allGiven = items.length > 0 && givenCount === items.length;
-  const progress = `${givenCount}/${items.length}`;
 
   const statusIcon = allGiven ? "✅" : givenCount > 0 ? "🔄" : "🆕";
   const statusText = allGiven ? "Выдан полностью" : givenCount > 0 ? "Частично выдан" : "Новый заказ";
@@ -218,33 +221,39 @@ async function buildOrderContent(orderId) {
   text += `🆔 \`${order.id.slice(0, 8).toUpperCase()}\`\n`;
   text += `📅 ${formatDate(order.created_at)}\n`;
   if (order.customer_phone) text += `📱 \`${order.customer_phone}\`\n`;
-  text += `📊 Выдано: *${progress}*\n`;
+  text += `📊 Выдано: *${givenCount}/${items.length}*\n`;
   text += `──────────────────────\n`;
 
   items.forEach((item) => {
-    const st = statuses.find((s) => String(s.product_id) === String(item.id));
+    // Используем product_id как ключ для поиска статуса
+    const st = statuses.find((s) => String(s.product_id) === String(item.product_id));
     const given = st?.given || false;
-    const name = item.title || item.id;
-    const qty = item.quantity || 1;
+    const name  = item.title || item.product_id;
+    const brand = item.brand ? ` · ${item.brand}` : "";
+    const ml    = item.ml_sizes ? ` ${item.ml_sizes}ml` : "";
+    const qty   = item.quantity || 1;
     const price = item.price ?? 0;
+    const cur   = item.valute || order.valute || "USD";
     const itemTotal = item.total ?? qty * price;
-    text += `${given ? "✅" : "⬜️"} *${name}*\n`;
-    text += `    ${qty} шт · ${price} USD · итого *${itemTotal} USD*\n`;
+
+    text += `${given ? "✅" : "⬜️"} *${name}*${brand}${ml}\n`;
+    text += `    ${qty} шт · ${price} ${cur} · итого *${itemTotal} ${cur}*\n`;
   });
 
   text += `──────────────────────\n`;
-  text += `💰 *Итого: ${order.total} USD*`;
+  text += `💰 *Итого: ${order.total} ${order.valute || "USD"}*`;
   if (!allGiven) text += `\n\n_Нажми на товар чтобы отметить выданным_`;
 
+  // Кнопки для каждого товара
   const buttons = items.map((item) => {
-    const st = statuses.find((s) => String(s.product_id) === String(item.id));
+    const st = statuses.find((s) => String(s.product_id) === String(item.product_id));
     const given = st?.given || false;
-    // ✅ ФИКС: обрезаем название до 28 символов чтобы не превысить лимит кнопки
-    const name = String(item.title || item.id).slice(0, 28);
+    const name = String(item.title || item.product_id).slice(0, 24);
+    const ml = item.ml_sizes ? ` ${item.ml_sizes}ml` : "";
     return [
       Markup.button.callback(
-        `${given ? "✅" : "⬜️"} ${name}`,
-        `tgl_${order.id}__${item.id}`
+        `${given ? "✅" : "⬜️"} ${name}${ml}`,
+        `tgl_${order.id}__${item.product_id}`
       ),
     ];
   });
@@ -258,79 +267,75 @@ async function buildOrderContent(orderId) {
 }
 
 async function buildStatsContent() {
-  const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/orders?select=id,total,created_at,items,customer_phone&order=created_at.desc`,
-    { headers }
-  );
-  const orders = await r.json().catch(() => []);
+  try {
+    const r = await fetch(
+      `${SUPABASE_URL}/rest/v1/orders?select=id,total,valute,created_at,items,customer_phone&order=created_at.desc`,
+      { headers }
+    );
+    const orders = await r.json().catch(() => []);
+    if (!Array.isArray(orders) || orders.length === 0) {
+      return {
+        text: `📊 *Статистика*\n\nЗаказов ещё нет.`,
+        kb: Markup.inlineKeyboard([[Markup.button.callback("🏠 Меню", "main_menu")]]),
+      };
+    }
 
-  if (!Array.isArray(orders) || orders.length === 0) {
+    const now = new Date();
+    const todayStr = now.toLocaleDateString("ru-RU");
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toLocaleDateString("ru-RU");
+    const weekAgo = new Date(now);
+    weekAgo.setDate(weekAgo.getDate() - 7);
+
+    const todayOrders     = orders.filter((o) => new Date(o.created_at).toLocaleDateString("ru-RU") === todayStr);
+    const yesterdayOrders = orders.filter((o) => new Date(o.created_at).toLocaleDateString("ru-RU") === yesterdayStr);
+    const weekOrders      = orders.filter((o) => new Date(o.created_at) >= weekAgo);
+
+    const sum = (arr) => arr.reduce((s, o) => s + (o.total || 0), 0);
+    const avg = Math.round(sum(orders) / orders.length);
+
+    // Топ продукты по количеству проданных штук
+    const productCount = {};
+    orders.forEach((o) => {
+      (Array.isArray(o.items) ? o.items : []).forEach((item) => {
+        const key = item.title || item.product_id;
+        productCount[key] = (productCount[key] || 0) + (item.quantity || 1);
+      });
+    });
+    const topProducts = Object.entries(productCount).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+    let text = `📊 *Статистика*\n`;
+    text += `──────────────────────\n`;
+    text += `📦 Всего заказов: *${orders.length}*\n`;
+    text += `💰 Общая выручка: *${sum(orders)} USD*\n`;
+    text += `📈 Средний чек: *${avg} USD*\n`;
+    text += `──────────────────────\n`;
+    text += `☀️ Сегодня: *${todayOrders.length}* зак · *${sum(todayOrders)} USD*\n`;
+    text += `🌙 Вчера: *${yesterdayOrders.length}* зак · *${sum(yesterdayOrders)} USD*\n`;
+    text += `📅 7 дней: *${weekOrders.length}* зак · *${sum(weekOrders)} USD*\n`;
+
+    if (topProducts.length > 0) {
+      text += `──────────────────────\n🏆 *Топ товары:*\n`;
+      ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"].forEach((m, i) => {
+        if (topProducts[i]) text += `${m} ${topProducts[i][0]} — *${topProducts[i][1]} шт*\n`;
+      });
+    }
+
     return {
-      text: `📊 *Статистика*\n\nЗаказов ещё нет.`,
+      text,
       kb: Markup.inlineKeyboard([
+        [Markup.button.callback("📦 Заказы", "orders_list"), Markup.button.callback("🔄 Обновить", "stats")],
         [Markup.button.callback("🏠 Меню", "main_menu")],
       ]),
     };
+  } catch (e) {
+    console.error("buildStatsContent error:", e);
+    return {
+      text: `📊 *Статистика*\n\n❌ Ошибка загрузки.`,
+      kb: Markup.inlineKeyboard([[Markup.button.callback("🏠 Меню", "main_menu")]]),
+    };
   }
-
-  const now = new Date();
-  const todayStr = now.toLocaleDateString("ru-RU");
-  const yesterday = new Date(now);
-  yesterday.setDate(yesterday.getDate() - 1);
-  const yesterdayStr = yesterday.toLocaleDateString("ru-RU");
-  const weekAgo = new Date(now);
-  weekAgo.setDate(weekAgo.getDate() - 7);
-
-  const todayOrders = orders.filter(
-    (o) => new Date(o.created_at).toLocaleDateString("ru-RU") === todayStr
-  );
-  const yesterdayOrders = orders.filter(
-    (o) => new Date(o.created_at).toLocaleDateString("ru-RU") === yesterdayStr
-  );
-  const weekOrders = orders.filter((o) => new Date(o.created_at) >= weekAgo);
-
-  const sum = (arr) => arr.reduce((s, o) => s + (o.total || 0), 0);
-  const avg = orders.length > 0 ? Math.round(sum(orders) / orders.length) : 0;
-
-  const productCount = {};
-  orders.forEach((o) => {
-    (Array.isArray(o.items) ? o.items : []).forEach((item) => {
-      const key = item.title || item.id;
-      productCount[key] = (productCount[key] || 0) + (item.quantity || 1);
-    });
-  });
-  const topProducts = Object.entries(productCount)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 5);
-
-  let text = `📊 *Статистика*\n`;
-  text += `──────────────────────\n`;
-  text += `📦 Всего заказов: *${orders.length}*\n`;
-  text += `💰 Общая выручка: *${sum(orders)} USD*\n`;
-  text += `📈 Средний чек: *${avg} USD*\n`;
-  text += `──────────────────────\n`;
-  text += `☀️ Сегодня: *${todayOrders.length}* зак · *${sum(todayOrders)} USD*\n`;
-  text += `🌙 Вчера: *${yesterdayOrders.length}* зак · *${sum(yesterdayOrders)} USD*\n`;
-  text += `📅 7 дней: *${weekOrders.length}* зак · *${sum(weekOrders)} USD*\n`;
-
-  if (topProducts.length > 0) {
-    text += `──────────────────────\n`;
-    text += `🏆 *Топ товары:*\n`;
-    const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"];
-    topProducts.forEach(([name, count], i) => {
-      text += `${medals[i]} ${name} — *${count} шт*\n`;
-    });
-  }
-
-  const kb = Markup.inlineKeyboard([
-    [
-      Markup.button.callback("📦 Заказы", "orders_list"),
-      Markup.button.callback("🔄 Обновить", "stats"),
-    ],
-    [Markup.button.callback("🏠 Меню", "main_menu")],
-  ]);
-
-  return { text, kb };
 }
 
 // ─── Reply клавиатура ─────────────────────────────────────────────────────────
@@ -349,6 +354,12 @@ export async function startBot() {
 
   const bot = new Telegraf(process.env.BOT_TOKEN);
 
+  // Глобальный обработчик — бот не падает при любой ошибке
+  bot.catch((err, ctx) => {
+    console.error("BOT ERROR:", err?.message || err);
+    ctx?.answerCbQuery?.("❌ Ошибка, попробуй ещё раз").catch(() => {});
+  });
+
   await bot.telegram.setMyCommands([
     { command: "start", description: "🏠 Главное меню" },
     { command: "orders", description: "📦 Заказы" },
@@ -356,24 +367,23 @@ export async function startBot() {
   ]);
 
   async function updatePanel(ctx, buildFn, ...args) {
-    await ctx.answerCbQuery().catch(() => { });
+    await ctx.answerCbQuery().catch(() => {});
     if (!adminSessions.has(ctx.from.id)) return;
-
-    const content = await buildFn(...args);
-    if (!content) {
-      return ctx.answerCbQuery("❌ Не найдено", { show_alert: true }).catch(() => { });
+    let content;
+    try {
+      content = await buildFn(...args);
+    } catch (e) {
+      console.error("updatePanel error:", e);
+      return ctx.answerCbQuery("❌ Ошибка загрузки", { show_alert: true }).catch(() => {});
     }
-
+    if (!content) return ctx.answerCbQuery("❌ Не найдено", { show_alert: true }).catch(() => {});
     const { text, kb } = content;
     try {
       await ctx.editMessageText(text, { parse_mode: "Markdown", ...kb });
     } catch (e) {
       if (!e.message?.includes("message is not modified")) {
         const sent = await ctx.reply(text, { parse_mode: "Markdown", ...kb });
-        adminPanelMsg.set(ctx.from.id, {
-          chatId: sent.chat.id,
-          messageId: sent.message_id,
-        });
+        adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
       }
     }
   }
@@ -381,61 +391,38 @@ export async function startBot() {
   async function sendPanel(ctx, content) {
     const { text, kb } = content;
     const stored = adminPanelMsg.get(ctx.from.id);
-
     if (stored) {
       try {
-        await bot.telegram.editMessageText(
-          stored.chatId, stored.messageId, null,
-          text, { parse_mode: "Markdown", ...kb }
-        );
+        await bot.telegram.editMessageText(stored.chatId, stored.messageId, null, text, {
+          parse_mode: "Markdown", ...kb,
+        });
         return;
       } catch (e) {
-        if (!e.message?.includes("message is not modified")) {
-          adminPanelMsg.delete(ctx.from.id);
-        } else {
-          return;
-        }
+        if (!e.message?.includes("message is not modified")) adminPanelMsg.delete(ctx.from.id);
+        else return;
       }
     }
-
     const sent = await ctx.reply(text, { parse_mode: "Markdown", ...kb });
-    adminPanelMsg.set(ctx.from.id, {
-      chatId: sent.chat.id,
-      messageId: sent.message_id,
-    });
+    adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
+  // ── /start ────────────────────────────────────────────────────────────────
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
-
     if (adminSessions.has(ctx.from.id) && !sessionId) {
       const content = buildMainMenuContent();
-      const sent = await ctx.reply(content.text, {
-        parse_mode: "Markdown",
-        ...content.kb,
-        ...adminReplyMenu,
-      });
+      const sent = await ctx.reply(content.text, { parse_mode: "Markdown", ...content.kb, ...adminReplyMenu });
       adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
       return;
     }
-
-    if (!sessionId) {
-      return ctx.reply("🔐 Открой бота по ссылке с сайта для авторизации.");
-    }
-
+    if (!sessionId) return ctx.reply("🔐 Открой бота по ссылке с сайта для авторизации.");
     sessions.set(ctx.from.id, sessionId);
-    return ctx.reply(
-      "👋 *Привет!*\nНажми кнопку ниже чтобы поделиться номером телефона:",
-      {
-        parse_mode: "Markdown",
-        ...Markup.keyboard([Markup.button.contactRequest("📱 Поделиться номером")]).resize(),
-      }
-    );
+    return ctx.reply("👋 *Привет!*\nНажми кнопку ниже чтобы поделиться номером телефона:", {
+      parse_mode: "Markdown",
+      ...Markup.keyboard([Markup.button.contactRequest("📱 Поделиться номером")]).resize(),
+    });
   });
-  bot.catch((err, ctx) => {
-    console.error("BOT ERROR:", err?.message || err);
-    console.error("Update that caused error:", JSON.stringify(ctx?.update, null, 2));
-  });
+
   bot.command("orders", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return ctx.reply("❌ Нет доступа.");
     await sendPanel(ctx, await buildOrdersListContent());
@@ -464,60 +451,41 @@ export async function startBot() {
   bot.on("contact", async (ctx) => {
     const sessionId = sessions.get(ctx.from.id);
     if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта заново.");
-
     const c = ctx.message.contact;
-    if (c.user_id !== ctx.from.id) {
-      return ctx.reply("❌ Можно отправить только свой номер.");
-    }
-
+    if (c.user_id !== ctx.from.id) return ctx.reply("❌ Можно отправить только свой номер.");
     const phone = normalizePhone(c.phone_number);
     pendingCode.set(ctx.from.id, { sessionId, phone });
     sessions.delete(ctx.from.id);
-
-    return ctx.reply(
-      "✅ *Номер получен!*\n\nТеперь введи *6-значный код* с сайта:",
-      { parse_mode: "Markdown", ...Markup.removeKeyboard() }
-    );
+    return ctx.reply("✅ *Номер получен!*\n\nТеперь введи *6-значный код* с сайта:", {
+      parse_mode: "Markdown", ...Markup.removeKeyboard(),
+    });
   });
 
   bot.on("text", async (ctx) => {
     const text = ctx.message.text?.trim();
     if (!text || text.startsWith("/")) return;
     if (["📦 Заказы", "📊 Статистика", "🏠 Меню"].includes(text)) return;
-
     const pending = pendingCode.get(ctx.from.id);
     if (!pending) return;
-
-    if (!/^\d{6}$/.test(text)) {
-      return ctx.reply("Введи ровно 6 цифр. Попробуй ещё раз.");
-    }
-
+    if (!/^\d{6}$/.test(text)) return ctx.reply("Введи ровно 6 цифр. Попробуй ещё раз.");
     const { sessionId, phone } = pending;
-
     try {
       const r = await fetch(`${process.env.SERVER_URL}/confirm`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-bot-secret": process.env.BOT_SECRET,
-        },
+        headers: { "Content-Type": "application/json", "x-bot-secret": process.env.BOT_SECRET },
         body: JSON.stringify({ sessionId, phone, code: text }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        if (data?.error === "Wrong code")
-          return ctx.reply("❌ Неверный код. Посмотри на сайте и попробуй ещё раз.");
+        if (data?.error === "Wrong code") return ctx.reply("❌ Неверный код. Посмотри на сайте и попробуй ещё раз.");
         return ctx.reply(`❌ Ошибка: ${data?.error || "confirm failed"}`);
       }
     } catch {
       return ctx.reply("❌ Сервер недоступен. Попробуй позже.");
     }
-
     pendingCode.delete(ctx.from.id);
-
     const admin = await isAdmin(phone);
     const backUrl = `${process.env.SITE_URL}/verify?sessionId=${sessionId}`;
-
     if (admin) {
       adminSessions.add(ctx.from.id);
       const content = buildMainMenuContent();
@@ -528,50 +496,51 @@ export async function startBot() {
       adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
       return;
     }
-
-    return ctx.reply(
-      "✅ *Номер подтверждён!*\nМожешь вернуться на сайт:",
-      {
-        parse_mode: "Markdown",
-        ...Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]]),
-      }
-    );
+    return ctx.reply("✅ *Номер подтверждён!*\nМожешь вернуться на сайт:", {
+      parse_mode: "Markdown",
+      ...Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]]),
+    });
   });
 
   // ── Inline actions ────────────────────────────────────────────────────────
   bot.action("main_menu", (ctx) => updatePanel(ctx, buildMainMenuContent));
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
   bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
-
-  // ✅ ФИКС: префикс o_ вместо order_ — короче, UUID всё равно уникален
   bot.action(/^o_([0-9a-f-]+)$/, (ctx) => updatePanel(ctx, buildOrderContent, ctx.match[1]));
 
   bot.action(/^tgl_([0-9a-f-]+)__(.+)$/, async (ctx) => {
-    if (!adminSessions.has(ctx.from.id)) {
+    if (!adminSessions.has(ctx.from.id))
       return ctx.answerCbQuery("❌ Нет доступа", { show_alert: true });
-    }
-
     const orderId = ctx.match[1];
     const productId = ctx.match[2];
-
-    const statuses = await getOrderItemsStatus(orderId);
-    const current = statuses.find((s) => String(s.product_id) === String(productId));
-    const newGiven = !(current?.given || false);
-
-    await setItemGiven(orderId, productId, newGiven);
-    await ctx.answerCbQuery(newGiven ? "✅ Выдан" : "↩️ Отмена").catch(() => { });
-    await updatePanel(ctx, buildOrderContent, orderId);
+    try {
+      const statuses = await getOrderItemsStatus(orderId);
+      const current = statuses.find((s) => String(s.product_id) === String(productId));
+      const newGiven = !(current?.given || false);
+      await setItemGiven(orderId, productId, newGiven);
+      await ctx.answerCbQuery(newGiven ? "✅ Выдан" : "↩️ Отменено").catch(() => {});
+      await updatePanel(ctx, buildOrderContent, orderId);
+    } catch (e) {
+      console.error("tgl action error:", e);
+      await ctx.answerCbQuery("❌ Ошибка", { show_alert: true }).catch(() => {});
+    }
   });
 
   // ── Уведомление о новом заказе ────────────────────────────────────────────
   bot.notifyAdmins = async (order) => {
     const adminTgIds = [...adminSessions];
     if (adminTgIds.length === 0) return;
-
     const items = Array.isArray(order.items) ? order.items : [];
-    const itemList = items
-      .map((i) => `• ${i.title || i.id} × ${i.quantity || 1} = ${i.total ?? (i.quantity || 1) * (i.price || 0)} USD`)
-      .join("\n");
+    const cur = order.valute || "USD";
+    const itemList = items.map((i) => {
+      const name  = i.title || i.product_id;
+      const brand = i.brand ? ` (${i.brand})` : "";
+      const ml    = i.ml_sizes ? ` ${i.ml_sizes}ml` : "";
+      const qty   = i.quantity || 1;
+      const price = i.price || 0;
+      const total = i.total ?? qty * price;
+      return `• ${name}${brand}${ml} × ${qty} = ${total} ${i.valute || cur}`;
+    }).join("\n");
 
     const msg =
       `🔔 *Новый заказ!*\n` +
@@ -581,17 +550,14 @@ export async function startBot() {
       (order.customer_phone ? `📱 \`${order.customer_phone}\`\n` : "") +
       `──────────────────────\n` +
       (itemList ? `${itemList}\n──────────────────────\n` : "") +
-      `💰 *Итого: ${order.total} USD*`;
+      `💰 *Итого: ${order.total} ${cur}*`;
 
-    const kb = Markup.inlineKeyboard([
-      [Markup.button.callback("📋 Открыть заказ", `o_${order.id}`)],
-    ]);
-
+    const kb = Markup.inlineKeyboard([[Markup.button.callback("📋 Открыть заказ", `o_${order.id}`)]]);
     for (const tgId of adminTgIds) {
       try {
         await bot.telegram.sendMessage(tgId, msg, { parse_mode: "Markdown", ...kb });
       } catch (e) {
-        console.log(`Failed to notify admin ${tgId}:`, e.message);
+        console.error(`Failed to notify admin ${tgId}:`, e.message);
       }
     }
   };
@@ -601,7 +567,7 @@ export async function startBot() {
     console.log("✅ Bot running...");
   } catch (e) {
     const msg = e?.response?.description || e?.message || String(e);
-    console.log("❌ BOT LAUNCH ERROR:", msg);
+    console.error("❌ BOT LAUNCH ERROR:", msg);
     if (String(msg).includes("409")) return bot;
     throw e;
   }

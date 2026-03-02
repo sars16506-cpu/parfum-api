@@ -48,7 +48,7 @@ let botInstance = null;
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("OK"));
 
-// ─── UptimeRobot ping (NO AUTH — публичный эндпоинт) ─────────────────────────
+// ─── Ping (публичный, без авторизации) ───────────────────────────────────────
 app.get("/ping", (req, res) => {
   console.log("🏓 Ping:", new Date().toLocaleTimeString("ru-RU"));
   res.json({ status: "ok", uptime: Math.floor(process.uptime()), time: new Date() });
@@ -59,27 +59,19 @@ app.get("/is-admin", async (req, res) => {
   try {
     const { phone } = req.query;
     if (!phone) return res.json({ isAdmin: false });
-
     const normalized = normalizePhone(phone);
-
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/admins_phones_numbers?select=phone`,
-      { headers }
-    );
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/admins_phones_numbers?select=phone`, { headers });
     const data = await r.json().catch(() => []);
     if (!Array.isArray(data)) return res.json({ isAdmin: false });
-
     const isAdmin = data.some((row) => {
-      const stored =
-        typeof row.phone === "string"
-          ? row.phone.replace(/^"|"$/g, "").trim()
-          : String(row.phone).trim();
+      const stored = typeof row.phone === "string"
+        ? row.phone.replace(/^"|"$/g, "").trim()
+        : String(row.phone).trim();
       return normalizePhone(stored) === normalized;
     });
-
     res.json({ isAdmin });
   } catch (err) {
-    console.log("IS-ADMIN ERROR:", err);
+    console.error("IS-ADMIN ERROR:", err);
     res.json({ isAdmin: false });
   }
 });
@@ -89,31 +81,24 @@ app.post("/start-verify", async (req, res) => {
   try {
     const { phone } = req.body || {};
     if (!phone) return res.status(400).json({ error: "Phone required" });
-
     const expectedPhone = normalizePhone(phone);
     const secretCode = String(Math.floor(100000 + Math.random() * 900000));
-
     const r = await fetch(`${SUPABASE_URL}/rest/v1/phone_verifications`, {
       method: "POST",
       headers: { ...headers, Prefer: "return=representation" },
-      body: JSON.stringify([
-        { phone: expectedPhone, verified: false, secret_code: secretCode },
-      ]),
+      body: JSON.stringify([{ phone: expectedPhone, verified: false, secret_code: secretCode }]),
     });
-
     const data = await r.json().catch(() => ({}));
     if (!r.ok) return res.status(400).json({ error: data });
-
     const sessionId = data?.[0]?.id;
     if (!sessionId) return res.status(500).json({ error: "No sessionId returned" });
-
     res.json({
       sessionId,
       secretCode,
       tgLink: `https://t.me/${process.env.BOT_USERNAME}?start=${sessionId}`,
     });
   } catch (err) {
-    console.log("START-VERIFY ERROR:", err);
+    console.error("START-VERIFY ERROR:", err);
     res.status(500).json({ error: "server error" });
   }
 });
@@ -122,56 +107,34 @@ app.post("/start-verify", async (req, res) => {
 app.post("/confirm", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
-    if (!BOT_SECRET || secret !== BOT_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
+    if (!BOT_SECRET || secret !== BOT_SECRET) return res.status(401).json({ error: "Unauthorized" });
     const { sessionId, phone, code } = req.body || {};
-    if (!sessionId || !phone) {
-      return res.status(400).json({ error: "sessionId and phone required" });
-    }
-
+    if (!sessionId || !phone) return res.status(400).json({ error: "sessionId and phone required" });
     const incomingPhone = normalizePhone(phone);
-
     const rr = await fetch(
       `${SUPABASE_URL}/rest/v1/phone_verifications?id=eq.${sessionId}&select=id,phone,verified,secret_code`,
       { headers }
     );
     const rows = await rr.json().catch(() => []);
     if (!rr.ok) return res.status(400).json({ error: rows });
-
     const row = rows?.[0];
     if (!row) return res.status(404).json({ error: "Session not found" });
-
-    if (normalizePhone(row.phone) !== incomingPhone) {
-      return res.status(400).json({
-        error: "Phone mismatch",
-        expected: normalizePhone(row.phone),
-        got: incomingPhone,
-      });
-    }
-
-    if (row.secret_code && code && String(row.secret_code) !== String(code)) {
+    if (normalizePhone(row.phone) !== incomingPhone)
+      return res.status(400).json({ error: "Phone mismatch" });
+    if (row.secret_code && code && String(row.secret_code) !== String(code))
       return res.status(400).json({ error: "Wrong code" });
-    }
-
-    const upd = await fetch(
-      `${SUPABASE_URL}/rest/v1/phone_verifications?id=eq.${sessionId}`,
-      {
-        method: "PATCH",
-        headers,
-        body: JSON.stringify({ verified: true }),
-      }
-    );
-
+    const upd = await fetch(`${SUPABASE_URL}/rest/v1/phone_verifications?id=eq.${sessionId}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ verified: true }),
+    });
     if (!upd.ok) {
       const e = await upd.json().catch(() => ({}));
       return res.status(400).json({ error: e });
     }
-
     res.json({ ok: true });
   } catch (err) {
-    console.log("CONFIRM ERROR:", err);
+    console.error("CONFIRM ERROR:", err);
     res.status(500).json({ error: "confirm error" });
   }
 });
@@ -180,70 +143,86 @@ app.post("/confirm", async (req, res) => {
 app.get("/status/:id", async (req, res) => {
   try {
     const { code } = req.query;
-
     const r = await fetch(
       `${SUPABASE_URL}/rest/v1/phone_verifications?id=eq.${req.params.id}&select=verified,secret_code,phone`,
       { headers }
     );
     const data = await r.json().catch(() => []);
     if (!r.ok) return res.status(400).json({ error: data });
-
     const row = data?.[0];
     if (!row) return res.status(404).json({ error: "Session not found" });
-
-    if (code && row.secret_code && String(row.secret_code) !== String(code)) {
+    if (code && row.secret_code && String(row.secret_code) !== String(code))
       return res.status(403).json({ error: "Wrong code" });
-    }
-
     res.json({ verified: row.verified === true });
   } catch (err) {
-    console.log("STATUS ERROR:", err);
+    console.error("STATUS ERROR:", err);
     res.status(500).json({ error: "status error" });
   }
 });
 
 // ─── Создать заказ ────────────────────────────────────────────────────────────
+/**
+ * POST /order
+ * Тело запроса:
+ * {
+ *   "customer_phone": "+998901234567",
+ *   "total": 5000,
+ *   "valute": "USD",          // общая валюта заказа
+ *   "items": [
+ *     {
+ *       "product_id": "uuid продукта из таблицы products",
+ *       "title": "Название",
+ *       "brand": "Бренд",
+ *       "ml_sizes": 100,       // выбранный объём
+ *       "quantity": 2,
+ *       "price": 2121,         // цена за 1 шт (со скидкой)
+ *       "valute": "USD"
+ *     }
+ *   ]
+ * }
+ */
 app.post("/order", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
-    if (!BOT_SECRET || secret !== BOT_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (!BOT_SECRET || secret !== BOT_SECRET) return res.status(401).json({ error: "Unauthorized" });
 
-    const { customer_phone, total, items } = req.body || {};
+    const { customer_phone, total, items, valute } = req.body || {};
 
-    if (!items || !Array.isArray(items) || items.length === 0) {
+    if (!items || !Array.isArray(items) || items.length === 0)
       return res.status(400).json({ error: "items array required" });
-    }
-    if (total === undefined || total === null) {
+    if (total === undefined || total === null)
       return res.status(400).json({ error: "total required" });
-    }
 
+    // Валидация каждого товара
     for (const item of items) {
-      if (!item.id) return res.status(400).json({ error: "Each item must have id" });
-      if (!item.title) return res.status(400).json({ error: "Each item must have title" });
+      if (!item.product_id) return res.status(400).json({ error: "Each item must have product_id" });
+      if (!item.title)      return res.status(400).json({ error: "Each item must have title" });
       if (!item.quantity || item.quantity < 1) return res.status(400).json({ error: "Each item must have quantity >= 1" });
       if (item.price === undefined) return res.status(400).json({ error: "Each item must have price" });
+      if (!item.ml_sizes)   return res.status(400).json({ error: "Each item must have ml_sizes" });
     }
 
+    // Нормализуем items — оставляем только нужные поля
     const normalizedItems = items.map((item) => ({
-      id: item.id,
-      title: item.title,
-      quantity: item.quantity,
-      price: item.price,
-      total: item.total ?? item.quantity * item.price,
+      product_id: item.product_id,
+      title:      item.title,
+      brand:      item.brand || null,
+      ml_sizes:   item.ml_sizes,
+      quantity:   item.quantity,
+      price:      item.price,
+      total:      item.total ?? item.quantity * item.price,
+      valute:     item.valute || valute || "USD",
     }));
 
     const r = await fetch(`${SUPABASE_URL}/rest/v1/orders`, {
       method: "POST",
       headers: { ...headers, Prefer: "return=representation" },
-      body: JSON.stringify([
-        {
-          customer_phone: customer_phone ? normalizePhone(customer_phone) : null,
-          total,
-          items: normalizedItems,
-        },
-      ]),
+      body: JSON.stringify([{
+        customer_phone: customer_phone ? normalizePhone(customer_phone) : null,
+        total,
+        valute: valute || "USD",
+        items: normalizedItems,
+      }]),
     });
 
     const data = await r.json().catch(() => ({}));
@@ -253,12 +232,12 @@ app.post("/order", async (req, res) => {
     if (!order) return res.status(500).json({ error: "Order not saved" });
 
     if (botInstance?.notifyAdmins) {
-      botInstance.notifyAdmins(order).catch((e) => console.log("Notify error:", e));
+      botInstance.notifyAdmins(order).catch((e) => console.error("Notify error:", e));
     }
 
     res.json({ ok: true, orderId: order.id });
   } catch (err) {
-    console.log("ORDER ERROR:", err);
+    console.error("ORDER ERROR:", err);
     res.status(500).json({ error: "order error" });
   }
 });
@@ -267,10 +246,7 @@ app.post("/order", async (req, res) => {
 app.get("/orders", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
-    if (!BOT_SECRET || secret !== BOT_SECRET) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
+    if (!BOT_SECRET || secret !== BOT_SECRET) return res.status(401).json({ error: "Unauthorized" });
     const limit = parseInt(req.query.limit) || 50;
     const r = await fetch(
       `${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=${limit}&select=*`,
@@ -278,10 +254,9 @@ app.get("/orders", async (req, res) => {
     );
     const data = await r.json().catch(() => []);
     if (!r.ok) return res.status(400).json({ error: data });
-
     res.json(data);
   } catch (err) {
-    console.log("ORDERS ERROR:", err);
+    console.error("ORDERS ERROR:", err);
     res.status(500).json({ error: "orders error" });
   }
 });
@@ -290,23 +265,22 @@ app.get("/orders", async (req, res) => {
 app.listen(PORT, async () => {
   console.log("✅ Server running on port", PORT);
 
-  // ── Keep-alive: пингуем себя каждые 60 сек чтобы Render не засыпал ────────
-  // Это предотвращает cold start 401 который фиксирует UptimeRobot
+  // Keep-alive: пингуем себя каждые 60 сек чтобы Render не засыпал
   if (process.env.SERVER_URL) {
     setInterval(async () => {
       try {
         const res = await fetch(`${process.env.SERVER_URL}/ping`);
         console.log("🔁 Self-ping:", res.status);
       } catch (e) {
-        console.log("🔁 Self-ping failed:", e.message);
+        console.error("🔁 Self-ping failed:", e.message);
       }
-    }, 60_000); // каждые 60 секунд
+    }, 60_000);
   }
 
   try {
     botInstance = await startBot();
     console.log("✅ Bot started");
   } catch (e) {
-    console.log("❌ Bot failed to start:", e.message);
+    console.error("❌ Bot failed to start:", e.message);
   }
 });
