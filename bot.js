@@ -64,9 +64,13 @@ async function getOrders(limit = 30) {
 
 async function getOrderByShortId(shortId) {
   try {
-    const r = await fetch(`${SUPABASE_URL}/rest/v1/orders?id=like.${shortId}*&select=*&limit=1`, { headers });
+    // JS-side filter — надёжнее чем LIKE в Supabase
+    const r = await fetch(`${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=100&select=*`, { headers });
     const data = await r.json().catch(() => []);
-    return Array.isArray(data) ? data[0] || null : null;
+    if (!Array.isArray(data)) return null;
+    const found = data.find((o) => String(o.id).toLowerCase().startsWith(shortId.toLowerCase()));
+    console.log("getOrderByShortId", shortId, "->", found?.id || "NOT FOUND");
+    return found || null;
   } catch (e) {
     console.log("getOrderByShortId error:", e);
     return null;
