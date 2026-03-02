@@ -356,12 +356,12 @@ export async function startBot() {
   ]);
 
   async function updatePanel(ctx, buildFn, ...args) {
-    await ctx.answerCbQuery().catch(() => {});
+    await ctx.answerCbQuery().catch(() => { });
     if (!adminSessions.has(ctx.from.id)) return;
 
     const content = await buildFn(...args);
     if (!content) {
-      return ctx.answerCbQuery("❌ Не найдено", { show_alert: true }).catch(() => {});
+      return ctx.answerCbQuery("❌ Не найдено", { show_alert: true }).catch(() => { });
     }
 
     const { text, kb } = content;
@@ -432,7 +432,10 @@ export async function startBot() {
       }
     );
   });
-
+  bot.catch((err, ctx) => {
+    console.error("BOT ERROR:", err?.message || err);
+    console.error("Update that caused error:", JSON.stringify(ctx?.update, null, 2));
+  });
   bot.command("orders", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return ctx.reply("❌ Нет доступа.");
     await sendPanel(ctx, await buildOrdersListContent());
@@ -556,7 +559,7 @@ export async function startBot() {
     const newGiven = !(current?.given || false);
 
     await setItemGiven(orderId, productId, newGiven);
-    await ctx.answerCbQuery(newGiven ? "✅ Выдан" : "↩️ Отмена").catch(() => {});
+    await ctx.answerCbQuery(newGiven ? "✅ Выдан" : "↩️ Отмена").catch(() => { });
     await updatePanel(ctx, buildOrderContent, orderId);
   });
 
