@@ -2,8 +2,8 @@ import { Telegraf, Markup } from "telegraf";
 import dotenv from "dotenv";
 dotenv.config();
 
-const sessions = new Map();     // tgId -> sessionId
-const pendingCode = new Map();  // tgId -> { sessionId, phone }  ← NEW
+const sessions = new Map();    // tgId -> sessionId
+const pendingCode = new Map(); // tgId -> { sessionId, phone }
 const adminSessions = new Set();
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -15,7 +15,7 @@ const headers = {
   "Content-Type": "application/json",
 };
 
-// ─── Утилиты ─────────────────────────────────────────────────────────────────
+// ─── Утилиты ──────────────────────────────────────────────────────────────────
 
 const normalizePhone = (p = "") => {
   let s = String(p).trim().replace(/[^\d+]/g, "");
@@ -33,19 +33,12 @@ async function isAdmin(phone) {
     const data = await r.json().catch(() => []);
     if (!Array.isArray(data)) return false;
 
-    console.log("Admin phones from DB:", JSON.stringify(data));
-    console.log("Checking phone:", phone);
-
     return data.some((row) => {
       const stored =
         typeof row.phone === "string"
           ? row.phone.replace(/^"|"$/g, "").trim()
           : String(row.phone).trim();
-      const match = normalizePhone(stored) === normalizePhone(phone);
-      console.log(
-        `Compare: "${normalizePhone(stored)}" === "${normalizePhone(phone)}" -> ${match}`
-      );
-      return match;
+      return normalizePhone(stored) === normalizePhone(phone);
     });
   } catch (e) {
     console.log("isAdmin error:", e);
@@ -53,36 +46,11 @@ async function isAdmin(phone) {
   }
 }
 
-async function getProductsByIds(ids) {
-  if (!ids || ids.length === 0) return [];
-  try {
-    const filter = ids.map((id) => `id.eq.${id}`).join(",");
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/products?or=(${filter})&select=id,title,item_left`,
-      { headers }
-    );
-    return r.json().catch(() => []);
-  } catch {
-    return [];
-  }
-}
-
-async function getProductById(productId) {
-  try {
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/products?id=eq.${productId}&select=id,title,item_left`,
-      { headers }
-    );
-    const data = await r.json().catch(() => []);
-    return data?.[0] || null;
-  } catch {
-    return null;
-  }
-}
+// ─── Supabase запросы ─────────────────────────────────────────────────────────
 
 async function getOrders(limit = 30) {
   const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=${limit}`,
+    `${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=${limit}&select=*`,
     { headers }
   );
   return r.json().catch(() => []);
@@ -90,7 +58,7 @@ async function getOrders(limit = 30) {
 
 async function getOrderById(orderId) {
   const r = await fetch(
-    `${SUPABASE_URL}/rest/v1/orders?id=eq.${orderId}`,
+    `${SUPABASE_URL}/rest/v1/orders?id=eq.${orderId}&select=*`,
     { headers }
   );
   const data = await r.json().catch(() => []);
@@ -123,11 +91,19 @@ async function setItemGiven(orderId, productId, newGiven) {
     const order = await getOrderById(orderId);
     if (!order?.items) return;
 
+    // items — массив объектов { id, title, quantity, price, total }
     const item = order.items.find((i) => String(i.id) === String(productId));
     if (!item) return;
 
     const qty = item.quantity || 1;
-    const product = await getProductById(productId);
+
+    // Уменьшаем item_left в products
+    const rp = await fetch(
+      `${SUPABASE_URL}/rest/v1/products?id=eq.${productId}&select=id,item_left`,
+      { headers }
+    );
+    const products = await rp.json().catch(() => []);
+    const product = products?.[0];
     if (!product) return;
 
     const newLeft = Math.max(0, (product.item_left || 0) - qty);
@@ -142,9 +118,23 @@ async function setItemGiven(orderId, productId, newGiven) {
   }
 }
 
-// ─── Форматирование ───────────────────────────────────────────────────────────
+// ─── Форматирование заказа ────────────────────────────────────────────────────
+
+/**
+ * Структура order из БД:
+ * {
+ *   id, created_at, customer_phone,
+ *   total,
+ *   basket: [
+ *     { id, title, quantity, price, total },
+ *     ...
+ *   ]
+ * }
+ */
 
 async function buildOrderText(order, statuses) {
+  const basket = Array.isArray(order.items) ? order.items : [];
+
   const date = new Date(order.created_at).toLocaleString("ru-RU", {
     day: "2-digit",
     month: "2-digit",
@@ -153,19 +143,9 @@ async function buildOrderText(order, statuses) {
     minute: "2-digit",
   });
 
-  const productIds = Array.isArray(order.items)
-    ? order.items.map((i) => i.id)
-    : [];
-  const products = await getProductsByIds(productIds);
-  const productMap = {};
-  products.forEach((p) => {
-    productMap[p.id] = p;
-  });
-
   const allGiven =
-    Array.isArray(order.items) &&
-    order.items.length > 0 &&
-    order.items.every((item) =>
+    basket.length > 0 &&
+    basket.every((item) =>
       statuses.find((s) => String(s.product_id) === String(item.id))?.given
     );
 
@@ -178,46 +158,37 @@ async function buildOrderText(order, statuses) {
   msg += `━━━━━━━━━━━━━━━━━━━━\n`;
   msg += `*Товары:*\n`;
 
-  if (Array.isArray(order.items)) {
-    order.items.forEach((item) => {
-      const st = statuses.find(
-        (s) => String(s.product_id) === String(item.id)
-      );
-      const given = st?.given || false;
-      const name = productMap[item.id]?.title || item.title || item.id;
-      const qty = item.quantity || 1;
-      msg += `${given ? "✅" : "⬜"} *${name}*\n`;
-      msg += `   ${qty} шт × ${item.price} USD\n`;
-    });
-  }
+  basket.forEach((item) => {
+    const st = statuses.find((s) => String(s.product_id) === String(item.id));
+    const given = st?.given || false;
+    const name = item.title || item.id;
+    const qty = item.quantity || 1;
+    const price = item.price ?? "?";
+    const itemTotal = item.total ?? (qty * price);
+    msg += `${given ? "✅" : "⬜"} *${name}*\n`;
+    msg += `   ${qty} шт × ${price} USD = ${itemTotal} USD\n`;
+  });
 
   msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-  msg += `_Нажми товар ниже чтобы отметить выданным_`;
+  msg += `_Нажми товар чтобы отметить выданным_`;
   return msg;
 }
 
-function buildOrderKeyboard(order, statuses, productMap = {}) {
+function buildOrderKeyboard(order, statuses) {
+  const basket = Array.isArray(order.items) ? order.items : [];
   const buttons = [];
 
-  if (Array.isArray(order.items)) {
-    order.items.forEach((item) => {
-      const st = statuses.find(
-        (s) => String(s.product_id) === String(item.id)
-      );
-      const given = st?.given || false;
-      const name = (
-        productMap[item.id]?.title ||
-        item.title ||
-        item.id
-      ).slice(0, 28);
-      buttons.push([
-        Markup.button.callback(
-          `${given ? "✅" : "⬜"} ${name}`,
-          `tgl_${order.id}__${item.id}`
-        ),
-      ]);
-    });
-  }
+  basket.forEach((item) => {
+    const st = statuses.find((s) => String(s.product_id) === String(item.id));
+    const given = st?.given || false;
+    const name = String(item.title || item.id).slice(0, 28);
+    buttons.push([
+      Markup.button.callback(
+        `${given ? "✅" : "⬜"} ${name}`,
+        `tgl_${order.id}__${item.id}`
+      ),
+    ]);
+  });
 
   buttons.push([
     Markup.button.callback("🔙 К заказам", "orders_list"),
@@ -240,12 +211,11 @@ async function showOrdersList(ctx, mode = "reply") {
   const orders = await getOrders(30);
 
   if (!Array.isArray(orders) || orders.length === 0) {
-    const text =
-      "📭 *Заказов пока нет*\n\nКак только придёт первый заказ — ты получишь уведомление.";
+    const text = "📭 *Заказов пока нет*\n\nКак только придёт первый заказ — ты получишь уведомление.";
     if (mode === "edit")
-      return ctx
-        .editMessageText(text, { parse_mode: "Markdown" })
-        .catch(() => ctx.reply(text, { parse_mode: "Markdown" }));
+      return ctx.editMessageText(text, { parse_mode: "Markdown" }).catch(() =>
+        ctx.reply(text, { parse_mode: "Markdown" })
+      );
     return ctx.reply(text, { parse_mode: "Markdown" });
   }
 
@@ -254,15 +224,17 @@ async function showOrdersList(ctx, mode = "reply") {
 
   const buttons = orders.map((o, i) => {
     const statuses = allStatuses[i];
+    const basket = Array.isArray(o.items) ? o.items : [];
     const date = new Date(o.created_at).toLocaleDateString("ru-RU");
-    const itemCount = Array.isArray(o.items) ? o.items.length : 0;
+    const itemCount = basket.length;
     const givenCount = statuses.filter((s) => s.given).length;
     const allDone = itemCount > 0 && givenCount === itemCount;
     const icon = allDone ? "✅" : givenCount > 0 ? "🔄" : "🆕";
+    const phone = o.customer_phone ? ` | ${o.customer_phone}` : "";
 
     return [
       Markup.button.callback(
-        `${icon} #${o.id.slice(0, 6)} | ${o.total}$ | ${givenCount}/${itemCount} тов | ${date}`,
+        `${icon} #${o.id.slice(0, 6)} | ${o.total}$ | ${givenCount}/${itemCount}${phone} | ${date}`,
         `order_${o.id}`
       ),
     ];
@@ -293,7 +265,7 @@ async function showOrdersList(ctx, mode = "reply") {
 async function showStats(ctx, mode = "reply") {
   try {
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/orders?select=id,total,created_at,items`,
+      `${SUPABASE_URL}/rest/v1/orders?select=id,total,created_at,items,customer_phone`,
       { headers }
     );
     const orders = await r.json().catch(() => []);
@@ -301,9 +273,9 @@ async function showStats(ctx, mode = "reply") {
     if (!Array.isArray(orders) || orders.length === 0) {
       const text = "📊 *Статистика*\n\nЗаказов ещё нет.";
       if (mode === "edit")
-        return ctx
-          .editMessageText(text, { parse_mode: "Markdown" })
-          .catch(() => ctx.reply(text, { parse_mode: "Markdown" }));
+        return ctx.editMessageText(text, { parse_mode: "Markdown" }).catch(() =>
+          ctx.reply(text, { parse_mode: "Markdown" })
+        );
       return ctx.reply(text, { parse_mode: "Markdown" });
     }
 
@@ -314,14 +286,14 @@ async function showStats(ctx, mode = "reply") {
     );
     const todayTotal = todayOrders.reduce((sum, o) => sum + (o.total || 0), 0);
 
+    // Топ товары из basket
     const productCount = {};
     orders.forEach((o) => {
-      if (Array.isArray(o.items)) {
-        o.items.forEach((item) => {
-          const key = item.title || item.id;
-          productCount[key] = (productCount[key] || 0) + (item.quantity || 1);
-        });
-      }
+      const basket = Array.isArray(o.items) ? o.items : [];
+      basket.forEach((item) => {
+        const key = item.title || item.id;
+        productCount[key] = (productCount[key] || 0) + (item.quantity || 1);
+      });
     });
 
     const topProducts = Object.entries(productCount)
@@ -391,9 +363,7 @@ export async function startBot() {
     sessions.set(ctx.from.id, sessionId);
     return ctx.reply(
       "👋 Привет!\nНажми кнопку чтобы поделиться номером телефона:",
-      Markup.keyboard([
-        Markup.button.contactRequest("📱 Поделиться номером"),
-      ]).resize()
+      Markup.keyboard([Markup.button.contactRequest("📱 Поделиться номером")]).resize()
     );
   });
 
@@ -425,7 +395,7 @@ export async function startBot() {
     return ctx.reply("✅ Бот работает!", adminMainMenu);
   });
 
-  // ── Контакт ── получаем телефон, ждём код ────────────────────────────────
+  // ── Контакт — получаем телефон, ждём код ─────────────────────────────────
   bot.on("contact", async (ctx) => {
     const sessionId = sessions.get(ctx.from.id);
     if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта заново.");
@@ -436,8 +406,6 @@ export async function startBot() {
     }
 
     const phone = normalizePhone(c.phone_number);
-
-    // Сохраняем данные и ждём код от пользователя
     pendingCode.set(ctx.from.id, { sessionId, phone });
     sessions.delete(ctx.from.id);
 
@@ -449,15 +417,12 @@ export async function startBot() {
 
   // ── Текст — ловим 6-значный код ───────────────────────────────────────────
   bot.on("text", async (ctx) => {
-    // Пропускаем команды и reply-кнопки
     const text = ctx.message.text?.trim();
     if (!text || text.startsWith("/")) return;
-
-    // Если это reply-кнопка администратора — не обрабатываем как код
     if (["📦 Заказы", "📊 Статистика", "🔄 Обновить"].includes(text)) return;
 
     const pending = pendingCode.get(ctx.from.id);
-    if (!pending) return; // не ждём кода от этого юзера
+    if (!pending) return;
 
     if (!/^\d{6}$/.test(text)) {
       return ctx.reply("Введи ровно 6 цифр. Попробуй ещё раз.");
@@ -488,7 +453,6 @@ export async function startBot() {
 
     pendingCode.delete(ctx.from.id);
 
-    console.log("Checking admin for phone:", phone);
     const admin = await isAdmin(phone);
     const backUrl = `${process.env.SITE_URL}/verify?sessionId=${sessionId}`;
 
@@ -520,21 +484,11 @@ export async function startBot() {
 
     const orderId = ctx.match[1];
     const order = await getOrderById(orderId);
-    if (!order)
-      return ctx.answerCbQuery("❌ Заказ не найден", { show_alert: true });
+    if (!order) return ctx.answerCbQuery("❌ Заказ не найден", { show_alert: true });
 
     const statuses = await getOrderItemsStatus(orderId);
-    const productIds = Array.isArray(order.items)
-      ? order.items.map((i) => i.id)
-      : [];
-    const products = await getProductsByIds(productIds);
-    const productMap = {};
-    products.forEach((p) => {
-      productMap[p.id] = p;
-    });
-
     const msg = await buildOrderText(order, statuses);
-    const kb = buildOrderKeyboard(order, statuses, productMap);
+    const kb = buildOrderKeyboard(order, statuses);
 
     try {
       await ctx.editMessageText(msg, { parse_mode: "Markdown", ...kb });
@@ -553,31 +507,18 @@ export async function startBot() {
     const productId = ctx.match[2];
 
     const statuses = await getOrderItemsStatus(orderId);
-    const current = statuses.find(
-      (s) => String(s.product_id) === String(productId)
-    );
+    const current = statuses.find((s) => String(s.product_id) === String(productId));
     const newGiven = !(current?.given || false);
 
     await setItemGiven(orderId, productId, newGiven);
-    await ctx.answerCbQuery(
-      newGiven ? "✅ Отмечен как выданный" : "↩️ Отметка снята"
-    );
+    await ctx.answerCbQuery(newGiven ? "✅ Отмечен как выданный" : "↩️ Отметка снята");
 
     const order = await getOrderById(orderId);
     if (!order) return;
 
     const newStatuses = await getOrderItemsStatus(orderId);
-    const productIds = Array.isArray(order.items)
-      ? order.items.map((i) => i.id)
-      : [];
-    const products = await getProductsByIds(productIds);
-    const productMap = {};
-    products.forEach((p) => {
-      productMap[p.id] = p;
-    });
-
     const msg = await buildOrderText(order, newStatuses);
-    const kb = buildOrderKeyboard(order, newStatuses, productMap);
+    const kb = buildOrderKeyboard(order, newStatuses);
 
     try {
       await ctx.editMessageText(msg, { parse_mode: "Markdown", ...kb });
@@ -601,12 +542,7 @@ export async function startBot() {
         await bot.telegram.sendMessage(tgId, `🔔 *Новый заказ!*\n\n${msg}`, {
           parse_mode: "Markdown",
           ...Markup.inlineKeyboard([
-            [
-              Markup.button.callback(
-                "📋 Открыть заказ",
-                `order_${order.id}`
-              ),
-            ],
+            [Markup.button.callback("📋 Открыть заказ", `order_${order.id}`)],
           ]),
         });
       } catch (e) {

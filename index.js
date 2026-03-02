@@ -54,7 +54,7 @@ app.get("/ping", (req, res) => {
   res.json({ status: "ok", uptime: Math.floor(process.uptime()), time: new Date() });
 });
 
-// ─── Проверить является ли номер админом ─────────────────────────────────────
+// ─── Проверить является ли номер админом ──────────────────────────────────────
 app.get("/is-admin", async (req, res) => {
   try {
     const { phone } = req.query;
@@ -70,9 +70,10 @@ app.get("/is-admin", async (req, res) => {
     if (!Array.isArray(data)) return res.json({ isAdmin: false });
 
     const isAdmin = data.some((row) => {
-      const stored = typeof row.phone === "string"
-        ? row.phone.replace(/^"|"$/g, "").trim()
-        : String(row.phone).trim();
+      const stored =
+        typeof row.phone === "string"
+          ? row.phone.replace(/^"|"$/g, "").trim()
+          : String(row.phone).trim();
       return normalizePhone(stored) === normalized;
     });
 
@@ -202,6 +203,24 @@ app.get("/status/:id", async (req, res) => {
 });
 
 // ─── Создать заказ ────────────────────────────────────────────────────────────
+/**
+ * POST /order
+ * Body:
+ * {
+ *   customer_phone: "+79991234567",   // номер покупателя
+ *   total: 150,                        // итоговая сумма
+ *   items: [                          // корзина товаров
+ *     {
+ *       id: "uuid-продукта",
+ *       title: "Название товара",
+ *       quantity: 2,                   // количество
+ *       price: 50,                     // цена за штуку
+ *       total: 100                     // сумма за этот товар (quantity * price)
+ *     },
+ *     ...
+ *   ]
+ * }
+ */
 app.post("/order", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
@@ -218,6 +237,23 @@ app.post("/order", async (req, res) => {
       return res.status(400).json({ error: "total required" });
     }
 
+    // Валидация каждого товара в корзине
+    for (const item of items) {
+      if (!item.id) return res.status(400).json({ error: "Each item must have id" });
+      if (!item.title) return res.status(400).json({ error: "Each item must have title" });
+      if (!item.quantity || item.quantity < 1) return res.status(400).json({ error: "Each item must have quantity >= 1" });
+      if (item.price === undefined) return res.status(400).json({ error: "Each item must have price" });
+    }
+
+    // Нормализуем items — считаем total для каждого товара если не передан
+    const normalizedItems = items.map((item) => ({
+      id: item.id,
+      title: item.title,
+      quantity: item.quantity,
+      price: item.price,
+      total: item.total ?? item.quantity * item.price,
+    }));
+
     const r = await fetch(`${SUPABASE_URL}/rest/v1/orders`, {
       method: "POST",
       headers: { ...headers, Prefer: "return=representation" },
@@ -225,7 +261,7 @@ app.post("/order", async (req, res) => {
         {
           customer_phone: customer_phone ? normalizePhone(customer_phone) : null,
           total,
-          items,
+          items: normalizedItems,
         },
       ]),
     });
@@ -257,7 +293,7 @@ app.get("/orders", async (req, res) => {
 
     const limit = parseInt(req.query.limit) || 50;
     const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=${limit}`,
+      `${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=${limit}&select=*`,
       { headers }
     );
     const data = await r.json().catch(() => []);
