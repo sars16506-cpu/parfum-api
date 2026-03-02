@@ -2,13 +2,10 @@ import { Telegraf, Markup } from "telegraf";
 import dotenv from "dotenv";
 dotenv.config();
 
-const sessions = new Map();    // tgId -> sessionId
-const pendingCode = new Map(); // tgId -> { sessionId, phone }
+const sessions = new Map();
+const pendingCode = new Map();
 const adminSessions = new Set();
-
-// Храним id "главного" сообщения панели для каждого админа —
-// чтобы всегда редактировать его, а не спамить новыми
-const adminPanelMsg = new Map(); // tgId -> { chatId, messageId }
+const adminPanelMsg = new Map();
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -186,14 +183,13 @@ async function buildOrdersListContent() {
     const partial = givenCount > 0 && !allDone;
     const icon = allDone ? "✅" : partial ? "🔄" : "🆕";
     const date = formatDateShort(o.created_at);
-    const phone = o.customer_phone ? `···${o.customer_phone.slice(-4)}` : "—";
 
-    return [
-      Markup.button.callback(
-        `${icon} #${o.id.slice(0, 6)} · ${o.total}$ · ${givenCount}/${itemCount} · ${phone} · ${date}`,
-        `order_${o.id}`
-      ),
-    ];
+    // ✅ ФИКС: убрали телефон из кнопки — текст теперь короткий и не крашит бота
+    const shortId = o.id.slice(0, 6);
+    const total = String(o.total ?? 0).slice(0, 8);
+    const label = `${icon} #${shortId} · ${total}$ · ${givenCount}/${itemCount} · ${date}`;
+
+    return [Markup.button.callback(label, `o_${o.id}`)];
   });
 
   buttons.push([
@@ -243,7 +239,8 @@ async function buildOrderContent(orderId) {
   const buttons = items.map((item) => {
     const st = statuses.find((s) => String(s.product_id) === String(item.id));
     const given = st?.given || false;
-    const name = String(item.title || item.id).slice(0, 24);
+    // ✅ ФИКС: обрезаем название до 28 символов чтобы не превысить лимит кнопки
+    const name = String(item.title || item.id).slice(0, 28);
     return [
       Markup.button.callback(
         `${given ? "✅" : "⬜️"} ${name}`,
@@ -254,7 +251,7 @@ async function buildOrderContent(orderId) {
 
   buttons.push([
     Markup.button.callback("◀️ К заказам", "orders_list"),
-    Markup.button.callback("🔄", `order_${order.id}`),
+    Markup.button.callback("🔄", `o_${order.id}`),
   ]);
 
   return { text, kb: Markup.inlineKeyboard(buttons) };
@@ -336,7 +333,7 @@ async function buildStatsContent() {
   return { text, kb };
 }
 
-// ─── Reply клавиатура (нижние кнопки) ────────────────────────────────────────
+// ─── Reply клавиатура ─────────────────────────────────────────────────────────
 
 const adminReplyMenu = Markup.keyboard([
   ["📦 Заказы", "📊 Статистика"],
@@ -358,7 +355,6 @@ export async function startBot() {
     { command: "stats", description: "📊 Статистика" },
   ]);
 
-  // ── Хелпер: редактировать текущее панельное сообщение ────────────────────
   async function updatePanel(ctx, buildFn, ...args) {
     await ctx.answerCbQuery().catch(() => {});
     if (!adminSessions.has(ctx.from.id)) return;
@@ -382,7 +378,6 @@ export async function startBot() {
     }
   }
 
-  // ── Хелпер: отправить новое или обновить сохранённое панельное сообщение ──
   async function sendPanel(ctx, content) {
     const { text, kb } = content;
     const stored = adminPanelMsg.get(ctx.from.id);
@@ -410,7 +405,6 @@ export async function startBot() {
     });
   }
 
-  // ── /start ────────────────────────────────────────────────────────────────
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
 
@@ -439,19 +433,16 @@ export async function startBot() {
     );
   });
 
-  // ── /orders ───────────────────────────────────────────────────────────────
   bot.command("orders", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return ctx.reply("❌ Нет доступа.");
     await sendPanel(ctx, await buildOrdersListContent());
   });
 
-  // ── /stats ────────────────────────────────────────────────────────────────
   bot.command("stats", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return ctx.reply("❌ Нет доступа.");
     await sendPanel(ctx, await buildStatsContent());
   });
 
-  // ── Reply кнопки ──────────────────────────────────────────────────────────
   bot.hears("📦 Заказы", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return;
     await sendPanel(ctx, await buildOrdersListContent());
@@ -467,7 +458,6 @@ export async function startBot() {
     await sendPanel(ctx, buildMainMenuContent());
   });
 
-  // ── Контакт → ждём код ────────────────────────────────────────────────────
   bot.on("contact", async (ctx) => {
     const sessionId = sessions.get(ctx.from.id);
     if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта заново.");
@@ -487,7 +477,6 @@ export async function startBot() {
     );
   });
 
-  // ── Текст → 6-значный код ─────────────────────────────────────────────────
   bot.on("text", async (ctx) => {
     const text = ctx.message.text?.trim();
     if (!text || text.startsWith("/")) return;
@@ -547,13 +536,13 @@ export async function startBot() {
   });
 
   // ── Inline actions ────────────────────────────────────────────────────────
-
   bot.action("main_menu", (ctx) => updatePanel(ctx, buildMainMenuContent));
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
   bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
-  bot.action(/^order_(.+)$/, (ctx) => updatePanel(ctx, buildOrderContent, ctx.match[1]));
 
-  // ── Inline: галочка товара ────────────────────────────────────────────────
+  // ✅ ФИКС: префикс o_ вместо order_ — короче, UUID всё равно уникален
+  bot.action(/^o_([0-9a-f-]+)$/, (ctx) => updatePanel(ctx, buildOrderContent, ctx.match[1]));
+
   bot.action(/^tgl_([0-9a-f-]+)__(.+)$/, async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) {
       return ctx.answerCbQuery("❌ Нет доступа", { show_alert: true });
@@ -592,7 +581,7 @@ export async function startBot() {
       `💰 *Итого: ${order.total} USD*`;
 
     const kb = Markup.inlineKeyboard([
-      [Markup.button.callback("📋 Открыть заказ", `order_${order.id}`)],
+      [Markup.button.callback("📋 Открыть заказ", `o_${order.id}`)],
     ]);
 
     for (const tgId of adminTgIds) {
