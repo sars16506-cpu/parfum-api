@@ -24,10 +24,8 @@ const normalizePhone = (p = "") => {
   return s;
 };
 
-// экранирование Markdown (Telegram Markdown, не V2)
-const md = (s = "") =>
-  String(s)
-    .replace(/([_*`[\]])/g, "\\$1");
+// Telegram Markdown (не V2) — экранируем опасные символы в названиях
+const md = (s = "") => String(s).replace(/([_*`[\]])/g, "\\$1");
 
 async function isAdmin(phone) {
   try {
@@ -127,7 +125,11 @@ async function setItemGiven(orderId, productId, newGiven) {
   try {
     const order = await getOrderById(orderId);
     const items = Array.isArray(order?.items) ? order.items : [];
-    const item = items.find((i) => String(i.product_id) === String(productId));
+
+    // поддержка старых заказов (если где-то было id вместо product_id)
+    const item = items.find(
+      (i) => String(i.product_id ?? i.id) === String(productId)
+    );
     if (!item) return;
 
     const qty = item.quantity || 1;
@@ -141,6 +143,7 @@ async function setItemGiven(orderId, productId, newGiven) {
     if (!product) return;
 
     const newLeft = Math.max(0, (product.item_left || 0) - qty);
+
     await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${productId}`, {
       method: "PATCH",
       headers,
@@ -177,15 +180,18 @@ async function buildOrdersListContent() {
   const orders = await getOrders(30);
 
   if (orders.length === 0) {
-    return {
-      text: `📦 *Заказы*\n\n📭 Заказов пока нет.\n_Как только придёт первый — ты получишь уведомление._`,
-      kb: Markup.inlineKeyboard([
-        [
-          Markup.button.callback("🔄 Обновить", "orders_list"),
-          Markup.button.callback("🏠 Меню", "main_menu"),
-        ],
-      ]),
-    };
+    const text =
+      `📦 *Заказы*\n\n` +
+      `📭 Заказов пока нет.\n` +
+      `_Как только придёт первый — ты получишь уведомление._`;
+
+    const kb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback("🔄 Обновить", "orders_list"),
+        Markup.button.callback("🏠 Меню", "main_menu"),
+      ],
+    ]);
+    return { text, kb };
   }
 
   const allStatuses = await Promise.all(orders.map((o) => getOrderItemsStatus(o.id)));
@@ -213,14 +219,13 @@ async function buildOrdersListContent() {
 
     const allDone = itemCount > 0 && givenCount === itemCount;
     const partial = givenCount > 0 && !allDone;
-
     const icon = allDone ? "✅" : partial ? "🔄" : "🆕";
+
     const cur = o.valute || "USD";
     const date = formatDateShort(o.created_at);
-
     const label = `${icon} #${o.id.slice(0, 6)} · ${o.total} ${cur} · ${givenCount}/${itemCount} · ${date}`;
 
-    // ВАЖНО: callback_data ровно "o_<uuid>"
+    // ВАЖНО: callback_data = o_<uuid>
     return [Markup.button.callback(label, `o_${o.id}`)];
   });
 
@@ -244,7 +249,11 @@ async function buildOrderContent(orderId) {
 
   const cur = order.valute || "USD";
   const statusIcon = allGiven ? "✅" : givenCount > 0 ? "🔄" : "🆕";
-  const statusText = allGiven ? "Выдан полностью" : givenCount > 0 ? "Частично выдан" : "Новый заказ";
+  const statusText = allGiven
+    ? "Выдан полностью"
+    : givenCount > 0
+    ? "Частично выдан"
+    : "Новый заказ";
 
   let text = `${statusIcon} *${statusText}*\n`;
   text += `──────────────────────\n`;
@@ -255,7 +264,7 @@ async function buildOrderContent(orderId) {
   text += `──────────────────────\n`;
 
   for (const item of items) {
-    const pid = item.product_id ?? item.id; // на случай старых заказов
+    const pid = item.product_id ?? item.id;
     const st = statuses.find((s) => String(s.product_id) === String(pid));
     const given = st?.given || false;
 
@@ -304,6 +313,7 @@ async function buildStatsContent() {
       { headers }
     );
     const orders = await r.json().catch(() => []);
+
     if (!Array.isArray(orders) || orders.length === 0) {
       return {
         text: `📊 *Статистика*\n\nЗаказов ещё нет.`,
@@ -398,18 +408,12 @@ export async function startBot() {
     { command: "stats", description: "📊 Статистика" },
   ]);
 
-  // редактировать сообщение, по которому нажали кнопку
+  // ✅ ВАЖНО: правильно прикрепляем inline keyboard через reply_markup
   async function updatePanel(ctx, buildFn, ...args) {
     await ctx.answerCbQuery().catch(() => {});
     if (!adminSessions.has(ctx.from.id)) return;
 
-    let content = null;
-    try {
-      content = await buildFn(...args);
-    } catch (e) {
-      console.log("updatePanel build error:", e);
-      return;
-    }
+    const content = await buildFn(...args);
     if (!content) return;
 
     const { text, kb } = content;
@@ -420,7 +424,6 @@ export async function startBot() {
         reply_markup: kb.reply_markup,
       });
     } catch (e) {
-      // если сообщение не редактируется, просто отправим новое
       if (!String(e?.message || "").includes("message is not modified")) {
         const sent = await ctx.reply(text, {
           parse_mode: "Markdown",
@@ -431,7 +434,6 @@ export async function startBot() {
     }
   }
 
-  // отправить новое или обновить сохранённое "главное" сообщение панели
   async function sendPanel(ctx, content) {
     const { text, kb } = content;
     const stored = adminPanelMsg.get(ctx.from.id);
@@ -443,12 +445,8 @@ export async function startBot() {
           reply_markup: kb.reply_markup,
         });
         return;
-      } catch (e) {
-        if (!String(e?.message || "").includes("message is not modified")) {
-          adminPanelMsg.delete(ctx.from.id);
-        } else {
-          return;
-        }
+      } catch {
+        adminPanelMsg.delete(ctx.from.id);
       }
     }
 
@@ -465,8 +463,7 @@ export async function startBot() {
     const sessionId = ctx.startPayload;
 
     if (adminSessions.has(ctx.from.id) && !sessionId) {
-      const content = buildMainMenuContent();
-      await sendPanel(ctx, content);
+      await sendPanel(ctx, buildMainMenuContent());
       return;
     }
 
@@ -507,7 +504,6 @@ export async function startBot() {
     await sendPanel(ctx, buildMainMenuContent());
   });
 
-  // контакт → ждём код
   bot.on("contact", async (ctx) => {
     const sessionId = sessions.get(ctx.from.id);
     if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта заново.");
@@ -525,7 +521,6 @@ export async function startBot() {
     });
   });
 
-  // текст → 6-значный код
   bot.on("text", async (ctx) => {
     const text = ctx.message.text?.trim();
     if (!text || text.startsWith("/")) return;
@@ -549,6 +544,7 @@ export async function startBot() {
         },
         body: JSON.stringify({ sessionId, phone, code: text }),
       });
+
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         if (data?.error === "Wrong code") {
@@ -583,10 +579,12 @@ export async function startBot() {
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
   bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
 
-  // ОТКРЫТЬ ЗАКАЗ: callback_data = "o_<uuid>"
-  bot.action(/^o_([0-9a-f-]{36})$/i, (ctx) => updatePanel(ctx, buildOrderContent, ctx.match[1]));
+  // открыть заказ
+  bot.action(/^o_([0-9a-f-]{36})$/i, (ctx) =>
+    updatePanel(ctx, buildOrderContent, ctx.match[1])
+  );
 
-  // ТУМБЛЕР ТОВАРА: callback_data = "tgl_<orderId>__<productId>"
+  // тумблер товара
   bot.action(/^tgl_([0-9a-f-]{36})__([0-9a-f-]{36})$/i, async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) {
       return ctx.answerCbQuery("❌ Нет доступа", { show_alert: true });
@@ -632,18 +630,30 @@ export async function startBot() {
       (itemList ? `${itemList}\n──────────────────────\n` : "") +
       `💰 *Итого: ${order.total} ${cur}*`;
 
-    const kb = Markup.inlineKeyboard([[Markup.button.callback("📋 Открыть заказ", `o_${order.id}`)]]);
+    const kb = Markup.inlineKeyboard([
+      [Markup.button.callback("📋 Открыть заказ", `o_${order.id}`)],
+    ]);
 
     for (const tgId of adminTgIds) {
-      await bot.telegram.sendMessage(tgId, msg, {
-        parse_mode: "Markdown",
-        reply_markup: kb.reply_markup,
-      }).catch(() => {});
+      await bot.telegram
+        .sendMessage(tgId, msg, {
+          parse_mode: "Markdown",
+          reply_markup: kb.reply_markup,
+        })
+        .catch(() => {});
     }
   };
 
-  await bot.launch();
-  console.log("✅ Bot running...");
+  // запуск
+  try {
+    await bot.launch();
+    console.log("✅ Bot running...");
+  } catch (e) {
+    const msg = e?.response?.description || e?.message || String(e);
+    console.log("❌ BOT LAUNCH ERROR:", msg);
+    if (String(msg).includes("409")) return bot; // уже запущен
+    throw e;
+  }
 
   return bot;
 }
