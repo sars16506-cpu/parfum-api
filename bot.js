@@ -118,7 +118,7 @@ async function setItemGiven(orderId, productId, newGiven) {
       Prefer: "resolution=merge-duplicates,return=representation",
     },
     body: JSON.stringify([{ order_id: orderId, product_id: productId, given: newGiven }]),
-  }).catch(() => {});
+  }).catch(() => { });
 
   if (!newGiven) return;
 
@@ -148,7 +148,7 @@ async function setItemGiven(orderId, productId, newGiven) {
       method: "PATCH",
       headers,
       body: JSON.stringify({ item_left: newLeft }),
-    }).catch(() => {});
+    }).catch(() => { });
   } catch (e) {
     console.log("setItemGiven error:", e);
   }
@@ -252,8 +252,8 @@ async function buildOrderContent(orderId) {
   const statusText = allGiven
     ? "Выдан полностью"
     : givenCount > 0
-    ? "Частично выдан"
-    : "Новый заказ";
+      ? "Частично выдан"
+      : "Новый заказ";
 
   let text = `${statusIcon} *${statusText}*\n`;
   text += `──────────────────────\n`;
@@ -410,7 +410,7 @@ export async function startBot() {
 
   // ✅ ВАЖНО: правильно прикрепляем inline keyboard через reply_markup
   async function updatePanel(ctx, buildFn, ...args) {
-    await ctx.answerCbQuery().catch(() => {});
+    await ctx.answerCbQuery().catch(() => { });
     if (!adminSessions.has(ctx.from.id)) return;
 
     const content = await buildFn(...args);
@@ -436,29 +436,38 @@ export async function startBot() {
 
   async function sendPanel(ctx, content) {
     const { text, kb } = content;
+
     const stored = adminPanelMsg.get(ctx.from.id);
 
     if (stored) {
       try {
-        await bot.telegram.editMessageText(stored.chatId, stored.messageId, null, text, {
-          parse_mode: "Markdown",
-          reply_markup: kb.reply_markup,
-        });
+        await bot.telegram.editMessageText(
+          stored.chatId,
+          stored.messageId,
+          null,
+          text,
+          {
+            parse_mode: "Markdown",
+            reply_markup: kb.reply_markup,
+          }
+        );
         return;
       } catch {
         adminPanelMsg.delete(ctx.from.id);
       }
     }
 
+    // ✅ ТОЛЬКО inline keyboard
     const sent = await ctx.reply(text, {
       parse_mode: "Markdown",
       reply_markup: kb.reply_markup,
-      ...adminReplyMenu,
     });
 
-    adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+    adminPanelMsg.set(ctx.from.id, {
+      chatId: sent.chat.id,
+      messageId: sent.message_id,
+    });
   }
-
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
 
@@ -598,7 +607,7 @@ export async function startBot() {
     const newGiven = !(current?.given || false);
 
     await setItemGiven(orderId, productId, newGiven);
-    await ctx.answerCbQuery(newGiven ? "✅ Выдан" : "↩️ Отмена").catch(() => {});
+    await ctx.answerCbQuery(newGiven ? "✅ Выдан" : "↩️ Отмена").catch(() => { });
     await updatePanel(ctx, buildOrderContent, orderId);
   });
 
@@ -640,7 +649,7 @@ export async function startBot() {
           parse_mode: "Markdown",
           reply_markup: kb.reply_markup,
         })
-        .catch(() => {});
+        .catch(() => { });
     }
   };
 
