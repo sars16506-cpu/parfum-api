@@ -6,6 +6,10 @@ const sessions = new Map();    // tgId -> sessionId
 const pendingCode = new Map(); // tgId -> { sessionId, phone }
 const adminSessions = new Set();
 
+// Храним id "главного" сообщения панели для каждого админа —
+// чтобы всегда редактировать его, а не спамить новыми
+const adminPanelMsg = new Map(); // tgId -> { chatId, messageId }
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
@@ -32,7 +36,6 @@ async function isAdmin(phone) {
     );
     const data = await r.json().catch(() => []);
     if (!Array.isArray(data)) return false;
-
     return data.some((row) => {
       const stored =
         typeof row.phone === "string"
@@ -46,7 +49,20 @@ async function isAdmin(phone) {
   }
 }
 
-// ─── Supabase запросы ─────────────────────────────────────────────────────────
+function formatDate(iso) {
+  return new Date(iso).toLocaleString("ru-RU", {
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function formatDateShort(iso) {
+  return new Date(iso).toLocaleDateString("ru-RU", {
+    day: "2-digit", month: "2-digit",
+  });
+}
+
+// ─── Supabase ─────────────────────────────────────────────────────────────────
 
 async function getOrders(limit = 30) {
   const r = await fetch(
@@ -90,14 +106,10 @@ async function setItemGiven(orderId, productId, newGiven) {
   try {
     const order = await getOrderById(orderId);
     if (!order?.items) return;
-
-    // items — массив объектов { id, title, quantity, price, total }
     const item = order.items.find((i) => String(i.id) === String(productId));
     if (!item) return;
-
     const qty = item.quantity || 1;
 
-    // Уменьшаем item_left в products
     const rp = await fetch(
       `${SUPABASE_URL}/rest/v1/products?id=eq.${productId}&select=id,item_left`,
       { headers }
@@ -112,223 +124,224 @@ async function setItemGiven(orderId, productId, newGiven) {
       headers,
       body: JSON.stringify({ item_left: newLeft }),
     });
-    console.log(`item_left: ${product.item_left} -> ${newLeft} for ${productId}`);
   } catch (e) {
     console.log("setItemGiven error:", e);
   }
 }
 
-// ─── Форматирование заказа ────────────────────────────────────────────────────
+// ─── Билдеры контента ─────────────────────────────────────────────────────────
 
-/**
- * Структура order из БД:
- * {
- *   id, created_at, customer_phone,
- *   total,
- *   basket: [
- *     { id, title, quantity, price, total },
- *     ...
- *   ]
- * }
- */
-
-async function buildOrderText(order, statuses) {
-  const basket = Array.isArray(order.items) ? order.items : [];
-
-  const date = new Date(order.created_at).toLocaleString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
+function buildMainMenuContent() {
+  const now = new Date().toLocaleString("ru-RU", {
+    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
   });
-
-  const allGiven =
-    basket.length > 0 &&
-    basket.every((item) =>
-      statuses.find((s) => String(s.product_id) === String(item.id))?.given
-    );
-
-  let msg = `${allGiven ? "✅ Выдан" : "🛒 Заказ"}\n`;
-  msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-  msg += `🆔 *#${order.id.slice(0, 8)}*\n`;
-  msg += `📅 ${date}\n`;
-  if (order.customer_phone) msg += `📱 ${order.customer_phone}\n`;
-  msg += `💰 Итого: *${order.total} USD*\n`;
-  msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-  msg += `*Товары:*\n`;
-
-  basket.forEach((item) => {
-    const st = statuses.find((s) => String(s.product_id) === String(item.id));
-    const given = st?.given || false;
-    const name = item.title || item.id;
-    const qty = item.quantity || 1;
-    const price = item.price ?? "?";
-    const itemTotal = item.total ?? (qty * price);
-    msg += `${given ? "✅" : "⬜"} *${name}*\n`;
-    msg += `   ${qty} шт × ${price} USD = ${itemTotal} USD\n`;
-  });
-
-  msg += `━━━━━━━━━━━━━━━━━━━━\n`;
-  msg += `_Нажми товар чтобы отметить выданным_`;
-  return msg;
-}
-
-function buildOrderKeyboard(order, statuses) {
-  const basket = Array.isArray(order.items) ? order.items : [];
-  const buttons = [];
-
-  basket.forEach((item) => {
-    const st = statuses.find((s) => String(s.product_id) === String(item.id));
-    const given = st?.given || false;
-    const name = String(item.title || item.id).slice(0, 28);
-    buttons.push([
-      Markup.button.callback(
-        `${given ? "✅" : "⬜"} ${name}`,
-        `tgl_${order.id}__${item.id}`
-      ),
-    ]);
-  });
-
-  buttons.push([
-    Markup.button.callback("🔙 К заказам", "orders_list"),
-    Markup.button.callback("🔄 Обновить", `order_${order.id}`),
+  const text = `👑 *Панель администратора*\n_Обновлено: ${now}_`;
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback("📦 Заказы", "orders_list"),
+      Markup.button.callback("📊 Статистика", "stats"),
+    ],
+    [Markup.button.callback("🔄 Обновить", "main_menu")],
   ]);
-
-  return Markup.inlineKeyboard(buttons);
+  return { text, kb };
 }
 
-// ─── Reply keyboard ───────────────────────────────────────────────────────────
-
-const adminMainMenu = Markup.keyboard([
-  ["📦 Заказы", "📊 Статистика"],
-  ["🔄 Обновить"],
-]).resize();
-
-// ─── Список заказов ───────────────────────────────────────────────────────────
-
-async function showOrdersList(ctx, mode = "reply") {
+async function buildOrdersListContent() {
   const orders = await getOrders(30);
 
   if (!Array.isArray(orders) || orders.length === 0) {
-    const text = "📭 *Заказов пока нет*\n\nКак только придёт первый заказ — ты получишь уведомление.";
-    if (mode === "edit")
-      return ctx.editMessageText(text, { parse_mode: "Markdown" }).catch(() =>
-        ctx.reply(text, { parse_mode: "Markdown" })
-      );
-    return ctx.reply(text, { parse_mode: "Markdown" });
+    const text = `📦 *Заказы*\n\n📭 Заказов пока нет.\n_Как только придёт первый — ты получишь уведомление._`;
+    const kb = Markup.inlineKeyboard([
+      [
+        Markup.button.callback("🔄 Обновить", "orders_list"),
+        Markup.button.callback("🏠 Меню", "main_menu"),
+      ],
+    ]);
+    return { text, kb };
   }
 
   const statusPromises = orders.map((o) => getOrderItemsStatus(o.id));
   const allStatuses = await Promise.all(statusPromises);
 
+  const totalNew = allStatuses.filter((st, i) => {
+    const items = Array.isArray(orders[i].items) ? orders[i].items : [];
+    return items.length > 0 && st.filter((s) => s.given).length === 0;
+  }).length;
+  const totalDone = allStatuses.filter((st, i) => {
+    const items = Array.isArray(orders[i].items) ? orders[i].items : [];
+    return items.length > 0 && st.filter((s) => s.given).length === items.length;
+  }).length;
+
+  let text = `📦 *Заказы* — последние ${orders.length}\n`;
+  text += `🆕 новых: *${totalNew}*  ✅ выдано: *${totalDone}*\n`;
+  text += `─────────────────────\n`;
+  text += `_Выбери заказ:_`;
+
   const buttons = orders.map((o, i) => {
     const statuses = allStatuses[i];
-    const basket = Array.isArray(o.items) ? o.items : [];
-    const date = new Date(o.created_at).toLocaleDateString("ru-RU");
-    const itemCount = basket.length;
+    const items = Array.isArray(o.items) ? o.items : [];
+    const itemCount = items.length;
     const givenCount = statuses.filter((s) => s.given).length;
     const allDone = itemCount > 0 && givenCount === itemCount;
-    const icon = allDone ? "✅" : givenCount > 0 ? "🔄" : "🆕";
-    const phone = o.customer_phone ? ` | ${o.customer_phone}` : "";
+    const partial = givenCount > 0 && !allDone;
+    const icon = allDone ? "✅" : partial ? "🔄" : "🆕";
+    const date = formatDateShort(o.created_at);
+    const phone = o.customer_phone ? `···${o.customer_phone.slice(-4)}` : "—";
 
     return [
       Markup.button.callback(
-        `${icon} #${o.id.slice(0, 6)} | ${o.total}$ | ${givenCount}/${itemCount}${phone} | ${date}`,
+        `${icon} #${o.id.slice(0, 6)} · ${o.total}$ · ${givenCount}/${itemCount} · ${phone} · ${date}`,
         `order_${o.id}`
       ),
     ];
   });
 
-  buttons.push([Markup.button.callback("🔄 Обновить список", "orders_list")]);
+  buttons.push([
+    Markup.button.callback("🔄 Обновить", "orders_list"),
+    Markup.button.callback("🏠 Меню", "main_menu"),
+  ]);
 
-  const text = `📦 *Заказы* (последние ${orders.length})\n🆕 новый  🔄 частично выдан  ✅ полностью выдан`;
-
-  try {
-    if (mode === "edit") {
-      return ctx.editMessageText(text, {
-        parse_mode: "Markdown",
-        ...Markup.inlineKeyboard(buttons),
-      });
-    }
-    return ctx.reply(text, {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard(buttons),
-    });
-  } catch (e) {
-    console.log("showOrdersList error:", e.message);
-  }
+  return { text, kb: Markup.inlineKeyboard(buttons) };
 }
 
-// ─── Статистика ───────────────────────────────────────────────────────────────
+async function buildOrderContent(orderId) {
+  const order = await getOrderById(orderId);
+  if (!order) return null;
 
-async function showStats(ctx, mode = "reply") {
-  try {
-    const r = await fetch(
-      `${SUPABASE_URL}/rest/v1/orders?select=id,total,created_at,items,customer_phone`,
-      { headers }
-    );
-    const orders = await r.json().catch(() => []);
+  const statuses = await getOrderItemsStatus(orderId);
+  const items = Array.isArray(order.items) ? order.items : [];
+  const givenCount = statuses.filter((s) => s.given).length;
+  const allGiven = items.length > 0 && givenCount === items.length;
+  const progress = `${givenCount}/${items.length}`;
 
-    if (!Array.isArray(orders) || orders.length === 0) {
-      const text = "📊 *Статистика*\n\nЗаказов ещё нет.";
-      if (mode === "edit")
-        return ctx.editMessageText(text, { parse_mode: "Markdown" }).catch(() =>
-          ctx.reply(text, { parse_mode: "Markdown" })
-        );
-      return ctx.reply(text, { parse_mode: "Markdown" });
-    }
+  const statusIcon = allGiven ? "✅" : givenCount > 0 ? "🔄" : "🆕";
+  const statusText = allGiven ? "Выдан полностью" : givenCount > 0 ? "Частично выдан" : "Новый заказ";
 
-    const total = orders.reduce((sum, o) => sum + (o.total || 0), 0);
-    const today = new Date().toLocaleDateString("ru-RU");
-    const todayOrders = orders.filter(
-      (o) => new Date(o.created_at).toLocaleDateString("ru-RU") === today
-    );
-    const todayTotal = todayOrders.reduce((sum, o) => sum + (o.total || 0), 0);
+  let text = `${statusIcon} *${statusText}*\n`;
+  text += `──────────────────────\n`;
+  text += `🆔 \`${order.id.slice(0, 8).toUpperCase()}\`\n`;
+  text += `📅 ${formatDate(order.created_at)}\n`;
+  if (order.customer_phone) text += `📱 \`${order.customer_phone}\`\n`;
+  text += `📊 Выдано: *${progress}*\n`;
+  text += `──────────────────────\n`;
 
-    // Топ товары из basket
-    const productCount = {};
-    orders.forEach((o) => {
-      const basket = Array.isArray(o.items) ? o.items : [];
-      basket.forEach((item) => {
-        const key = item.title || item.id;
-        productCount[key] = (productCount[key] || 0) + (item.quantity || 1);
-      });
-    });
+  items.forEach((item) => {
+    const st = statuses.find((s) => String(s.product_id) === String(item.id));
+    const given = st?.given || false;
+    const name = item.title || item.id;
+    const qty = item.quantity || 1;
+    const price = item.price ?? 0;
+    const itemTotal = item.total ?? qty * price;
+    text += `${given ? "✅" : "⬜️"} *${name}*\n`;
+    text += `    ${qty} шт · ${price} USD · итого *${itemTotal} USD*\n`;
+  });
 
-    const topProducts = Object.entries(productCount)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5);
+  text += `──────────────────────\n`;
+  text += `💰 *Итого: ${order.total} USD*`;
+  if (!allGiven) text += `\n\n_Нажми на товар чтобы отметить выданным_`;
 
-    let text = `📊 *Статистика*\n`;
-    text += `━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `📦 Всего заказов: *${orders.length}*\n`;
-    text += `💰 Общая выручка: *${total} USD*\n`;
-    text += `━━━━━━━━━━━━━━━━━━━━\n`;
-    text += `🗓 Сегодня заказов: *${todayOrders.length}*\n`;
-    text += `💵 Сегодня выручка: *${todayTotal} USD*\n`;
+  const buttons = items.map((item) => {
+    const st = statuses.find((s) => String(s.product_id) === String(item.id));
+    const given = st?.given || false;
+    const name = String(item.title || item.id).slice(0, 24);
+    return [
+      Markup.button.callback(
+        `${given ? "✅" : "⬜️"} ${name}`,
+        `tgl_${order.id}__${item.id}`
+      ),
+    ];
+  });
 
-    if (topProducts.length > 0) {
-      text += `━━━━━━━━━━━━━━━━━━━━\n`;
-      text += `🏆 *Топ товары:*\n`;
-      topProducts.forEach(([name, count], i) => {
-        text += `${i + 1}. ${name} — ${count} шт\n`;
-      });
-    }
+  buttons.push([
+    Markup.button.callback("◀️ К заказам", "orders_list"),
+    Markup.button.callback("🔄", `order_${order.id}`),
+  ]);
 
-    const kb = Markup.inlineKeyboard([
-      [Markup.button.callback("📦 К заказам", "orders_list")],
-    ]);
-
-    if (mode === "edit")
-      return ctx
-        .editMessageText(text, { parse_mode: "Markdown", ...kb })
-        .catch(() => ctx.reply(text, { parse_mode: "Markdown", ...kb }));
-    return ctx.reply(text, { parse_mode: "Markdown", ...kb });
-  } catch (e) {
-    console.log("showStats error:", e);
-  }
+  return { text, kb: Markup.inlineKeyboard(buttons) };
 }
+
+async function buildStatsContent() {
+  const r = await fetch(
+    `${SUPABASE_URL}/rest/v1/orders?select=id,total,created_at,items,customer_phone&order=created_at.desc`,
+    { headers }
+  );
+  const orders = await r.json().catch(() => []);
+
+  if (!Array.isArray(orders) || orders.length === 0) {
+    return {
+      text: `📊 *Статистика*\n\nЗаказов ещё нет.`,
+      kb: Markup.inlineKeyboard([
+        [Markup.button.callback("🏠 Меню", "main_menu")],
+      ]),
+    };
+  }
+
+  const now = new Date();
+  const todayStr = now.toLocaleDateString("ru-RU");
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toLocaleDateString("ru-RU");
+  const weekAgo = new Date(now);
+  weekAgo.setDate(weekAgo.getDate() - 7);
+
+  const todayOrders = orders.filter(
+    (o) => new Date(o.created_at).toLocaleDateString("ru-RU") === todayStr
+  );
+  const yesterdayOrders = orders.filter(
+    (o) => new Date(o.created_at).toLocaleDateString("ru-RU") === yesterdayStr
+  );
+  const weekOrders = orders.filter((o) => new Date(o.created_at) >= weekAgo);
+
+  const sum = (arr) => arr.reduce((s, o) => s + (o.total || 0), 0);
+  const avg = orders.length > 0 ? Math.round(sum(orders) / orders.length) : 0;
+
+  const productCount = {};
+  orders.forEach((o) => {
+    (Array.isArray(o.items) ? o.items : []).forEach((item) => {
+      const key = item.title || item.id;
+      productCount[key] = (productCount[key] || 0) + (item.quantity || 1);
+    });
+  });
+  const topProducts = Object.entries(productCount)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5);
+
+  let text = `📊 *Статистика*\n`;
+  text += `──────────────────────\n`;
+  text += `📦 Всего заказов: *${orders.length}*\n`;
+  text += `💰 Общая выручка: *${sum(orders)} USD*\n`;
+  text += `📈 Средний чек: *${avg} USD*\n`;
+  text += `──────────────────────\n`;
+  text += `☀️ Сегодня: *${todayOrders.length}* зак · *${sum(todayOrders)} USD*\n`;
+  text += `🌙 Вчера: *${yesterdayOrders.length}* зак · *${sum(yesterdayOrders)} USD*\n`;
+  text += `📅 7 дней: *${weekOrders.length}* зак · *${sum(weekOrders)} USD*\n`;
+
+  if (topProducts.length > 0) {
+    text += `──────────────────────\n`;
+    text += `🏆 *Топ товары:*\n`;
+    const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"];
+    topProducts.forEach(([name, count], i) => {
+      text += `${medals[i]} ${name} — *${count} шт*\n`;
+    });
+  }
+
+  const kb = Markup.inlineKeyboard([
+    [
+      Markup.button.callback("📦 Заказы", "orders_list"),
+      Markup.button.callback("🔄 Обновить", "stats"),
+    ],
+    [Markup.button.callback("🏠 Меню", "main_menu")],
+  ]);
+
+  return { text, kb };
+}
+
+// ─── Reply клавиатура (нижние кнопки) ────────────────────────────────────────
+
+const adminReplyMenu = Markup.keyboard([
+  ["📦 Заказы", "📊 Статистика"],
+  ["🏠 Меню"],
+]).resize();
 
 // ─── startBot ─────────────────────────────────────────────────────────────────
 
@@ -341,61 +354,120 @@ export async function startBot() {
 
   await bot.telegram.setMyCommands([
     { command: "start", description: "🏠 Главное меню" },
-    { command: "orders", description: "📦 Список заказов" },
+    { command: "orders", description: "📦 Заказы" },
     { command: "stats", description: "📊 Статистика" },
   ]);
+
+  // ── Хелпер: редактировать текущее панельное сообщение ────────────────────
+  async function updatePanel(ctx, buildFn, ...args) {
+    await ctx.answerCbQuery().catch(() => {});
+    if (!adminSessions.has(ctx.from.id)) return;
+
+    const content = await buildFn(...args);
+    if (!content) {
+      return ctx.answerCbQuery("❌ Не найдено", { show_alert: true }).catch(() => {});
+    }
+
+    const { text, kb } = content;
+    try {
+      await ctx.editMessageText(text, { parse_mode: "Markdown", ...kb });
+    } catch (e) {
+      if (!e.message?.includes("message is not modified")) {
+        const sent = await ctx.reply(text, { parse_mode: "Markdown", ...kb });
+        adminPanelMsg.set(ctx.from.id, {
+          chatId: sent.chat.id,
+          messageId: sent.message_id,
+        });
+      }
+    }
+  }
+
+  // ── Хелпер: отправить новое или обновить сохранённое панельное сообщение ──
+  async function sendPanel(ctx, content) {
+    const { text, kb } = content;
+    const stored = adminPanelMsg.get(ctx.from.id);
+
+    if (stored) {
+      try {
+        await bot.telegram.editMessageText(
+          stored.chatId, stored.messageId, null,
+          text, { parse_mode: "Markdown", ...kb }
+        );
+        return;
+      } catch (e) {
+        if (!e.message?.includes("message is not modified")) {
+          adminPanelMsg.delete(ctx.from.id);
+        } else {
+          return;
+        }
+      }
+    }
+
+    const sent = await ctx.reply(text, { parse_mode: "Markdown", ...kb });
+    adminPanelMsg.set(ctx.from.id, {
+      chatId: sent.chat.id,
+      messageId: sent.message_id,
+    });
+  }
 
   // ── /start ────────────────────────────────────────────────────────────────
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
 
     if (adminSessions.has(ctx.from.id) && !sessionId) {
-      return ctx.reply("👑 *Панель администратора*\nВыбери действие:", {
+      const content = buildMainMenuContent();
+      const sent = await ctx.reply(content.text, {
         parse_mode: "Markdown",
-        ...adminMainMenu,
+        ...content.kb,
+        ...adminReplyMenu,
       });
+      adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+      return;
     }
 
     if (!sessionId) {
-      return ctx.reply("Открой бота по ссылке с сайта для авторизации.");
+      return ctx.reply("🔐 Открой бота по ссылке с сайта для авторизации.");
     }
 
     sessions.set(ctx.from.id, sessionId);
     return ctx.reply(
-      "👋 Привет!\nНажми кнопку чтобы поделиться номером телефона:",
-      Markup.keyboard([Markup.button.contactRequest("📱 Поделиться номером")]).resize()
+      "👋 *Привет!*\nНажми кнопку ниже чтобы поделиться номером телефона:",
+      {
+        parse_mode: "Markdown",
+        ...Markup.keyboard([Markup.button.contactRequest("📱 Поделиться номером")]).resize(),
+      }
     );
   });
 
   // ── /orders ───────────────────────────────────────────────────────────────
   bot.command("orders", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return ctx.reply("❌ Нет доступа.");
-    await showOrdersList(ctx, "reply");
+    await sendPanel(ctx, await buildOrdersListContent());
   });
 
   // ── /stats ────────────────────────────────────────────────────────────────
   bot.command("stats", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return ctx.reply("❌ Нет доступа.");
-    await showStats(ctx, "reply");
+    await sendPanel(ctx, await buildStatsContent());
   });
 
   // ── Reply кнопки ──────────────────────────────────────────────────────────
   bot.hears("📦 Заказы", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return;
-    await showOrdersList(ctx, "reply");
+    await sendPanel(ctx, await buildOrdersListContent());
   });
 
   bot.hears("📊 Статистика", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return;
-    await showStats(ctx, "reply");
+    await sendPanel(ctx, await buildStatsContent());
   });
 
-  bot.hears("🔄 Обновить", async (ctx) => {
+  bot.hears("🏠 Меню", async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return;
-    return ctx.reply("✅ Бот работает!", adminMainMenu);
+    await sendPanel(ctx, buildMainMenuContent());
   });
 
-  // ── Контакт — получаем телефон, ждём код ─────────────────────────────────
+  // ── Контакт → ждём код ────────────────────────────────────────────────────
   bot.on("contact", async (ctx) => {
     const sessionId = sessions.get(ctx.from.id);
     if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта заново.");
@@ -410,16 +482,16 @@ export async function startBot() {
     sessions.delete(ctx.from.id);
 
     return ctx.reply(
-      "✅ Номер получен!\n\nТеперь введи *6-значный код* с сайта:",
+      "✅ *Номер получен!*\n\nТеперь введи *6-значный код* с сайта:",
       { parse_mode: "Markdown", ...Markup.removeKeyboard() }
     );
   });
 
-  // ── Текст — ловим 6-значный код ───────────────────────────────────────────
+  // ── Текст → 6-значный код ─────────────────────────────────────────────────
   bot.on("text", async (ctx) => {
     const text = ctx.message.text?.trim();
     if (!text || text.startsWith("/")) return;
-    if (["📦 Заказы", "📊 Статистика", "🔄 Обновить"].includes(text)) return;
+    if (["📦 Заказы", "📊 Статистика", "🏠 Меню"].includes(text)) return;
 
     const pending = pendingCode.get(ctx.from.id);
     if (!pending) return;
@@ -440,11 +512,9 @@ export async function startBot() {
         body: JSON.stringify({ sessionId, phone, code: text }),
       });
       const data = await r.json().catch(() => ({}));
-
       if (!r.ok) {
-        if (data?.error === "Wrong code") {
-          return ctx.reply("❌ Неверный код. Посмотри код на сайте и попробуй ещё раз.");
-        }
+        if (data?.error === "Wrong code")
+          return ctx.reply("❌ Неверный код. Посмотри на сайте и попробуй ещё раз.");
         return ctx.reply(`❌ Ошибка: ${data?.error || "confirm failed"}`);
       }
     } catch {
@@ -458,44 +528,30 @@ export async function startBot() {
 
     if (admin) {
       adminSessions.add(ctx.from.id);
-      return ctx.reply(
-        "👑 *Добро пожаловать, Администратор!*\nВыбери действие:",
-        { parse_mode: "Markdown", ...adminMainMenu }
+      const content = buildMainMenuContent();
+      const sent = await ctx.reply(
+        `👑 *Добро пожаловать, Администратор!*\n\n${content.text}`,
+        { parse_mode: "Markdown", ...content.kb, ...adminReplyMenu }
       );
+      adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+      return;
     }
 
     return ctx.reply(
-      "✅ Номер подтверждён!\nМожешь вернуться на сайт:",
-      Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]])
+      "✅ *Номер подтверждён!*\nМожешь вернуться на сайт:",
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]]),
+      }
     );
   });
 
-  // ── Inline: список заказов ────────────────────────────────────────────────
-  bot.action("orders_list", async (ctx) => {
-    await ctx.answerCbQuery();
-    if (!adminSessions.has(ctx.from.id)) return;
-    await showOrdersList(ctx, "edit");
-  });
+  // ── Inline actions ────────────────────────────────────────────────────────
 
-  // ── Inline: открыть заказ ─────────────────────────────────────────────────
-  bot.action(/^order_(.+)$/, async (ctx) => {
-    await ctx.answerCbQuery();
-    if (!adminSessions.has(ctx.from.id)) return;
-
-    const orderId = ctx.match[1];
-    const order = await getOrderById(orderId);
-    if (!order) return ctx.answerCbQuery("❌ Заказ не найден", { show_alert: true });
-
-    const statuses = await getOrderItemsStatus(orderId);
-    const msg = await buildOrderText(order, statuses);
-    const kb = buildOrderKeyboard(order, statuses);
-
-    try {
-      await ctx.editMessageText(msg, { parse_mode: "Markdown", ...kb });
-    } catch {
-      await ctx.reply(msg, { parse_mode: "Markdown", ...kb });
-    }
-  });
+  bot.action("main_menu", (ctx) => updatePanel(ctx, buildMainMenuContent));
+  bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
+  bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
+  bot.action(/^order_(.+)$/, (ctx) => updatePanel(ctx, buildOrderContent, ctx.match[1]));
 
   // ── Inline: галочка товара ────────────────────────────────────────────────
   bot.action(/^tgl_([0-9a-f-]+)__(.+)$/, async (ctx) => {
@@ -511,40 +567,37 @@ export async function startBot() {
     const newGiven = !(current?.given || false);
 
     await setItemGiven(orderId, productId, newGiven);
-    await ctx.answerCbQuery(newGiven ? "✅ Отмечен как выданный" : "↩️ Отметка снята");
-
-    const order = await getOrderById(orderId);
-    if (!order) return;
-
-    const newStatuses = await getOrderItemsStatus(orderId);
-    const msg = await buildOrderText(order, newStatuses);
-    const kb = buildOrderKeyboard(order, newStatuses);
-
-    try {
-      await ctx.editMessageText(msg, { parse_mode: "Markdown", ...kb });
-    } catch (e) {
-      console.log("edit error:", e.message);
-    }
+    await ctx.answerCbQuery(newGiven ? "✅ Выдан" : "↩️ Отмена").catch(() => {});
+    await updatePanel(ctx, buildOrderContent, orderId);
   });
 
   // ── Уведомление о новом заказе ────────────────────────────────────────────
   bot.notifyAdmins = async (order) => {
     const adminTgIds = [...adminSessions];
-    if (adminTgIds.length === 0) {
-      console.log("No active admin sessions to notify");
-      return;
-    }
+    if (adminTgIds.length === 0) return;
 
-    const msg = await buildOrderText(order, []);
+    const items = Array.isArray(order.items) ? order.items : [];
+    const itemList = items
+      .map((i) => `• ${i.title || i.id} × ${i.quantity || 1} = ${i.total ?? (i.quantity || 1) * (i.price || 0)} USD`)
+      .join("\n");
+
+    const msg =
+      `🔔 *Новый заказ!*\n` +
+      `──────────────────────\n` +
+      `🆔 \`${order.id.slice(0, 8).toUpperCase()}\`\n` +
+      `📅 ${formatDate(order.created_at)}\n` +
+      (order.customer_phone ? `📱 \`${order.customer_phone}\`\n` : "") +
+      `──────────────────────\n` +
+      (itemList ? `${itemList}\n──────────────────────\n` : "") +
+      `💰 *Итого: ${order.total} USD*`;
+
+    const kb = Markup.inlineKeyboard([
+      [Markup.button.callback("📋 Открыть заказ", `order_${order.id}`)],
+    ]);
 
     for (const tgId of adminTgIds) {
       try {
-        await bot.telegram.sendMessage(tgId, `🔔 *Новый заказ!*\n\n${msg}`, {
-          parse_mode: "Markdown",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("📋 Открыть заказ", `order_${order.id}`)],
-          ]),
-        });
+        await bot.telegram.sendMessage(tgId, msg, { parse_mode: "Markdown", ...kb });
       } catch (e) {
         console.log(`Failed to notify admin ${tgId}:`, e.message);
       }
