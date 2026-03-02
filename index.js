@@ -48,7 +48,7 @@ let botInstance = null;
 // ─── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("OK"));
 
-// ─── UptimeRobot ping ─────────────────────────────────────────────────────────
+// ─── UptimeRobot ping (NO AUTH — публичный эндпоинт) ─────────────────────────
 app.get("/ping", (req, res) => {
   console.log("🏓 Ping:", new Date().toLocaleTimeString("ru-RU"));
   res.json({ status: "ok", uptime: Math.floor(process.uptime()), time: new Date() });
@@ -203,24 +203,6 @@ app.get("/status/:id", async (req, res) => {
 });
 
 // ─── Создать заказ ────────────────────────────────────────────────────────────
-/**
- * POST /order
- * Body:
- * {
- *   customer_phone: "+79991234567",   // номер покупателя
- *   total: 150,                        // итоговая сумма
- *   items: [                          // корзина товаров
- *     {
- *       id: "uuid-продукта",
- *       title: "Название товара",
- *       quantity: 2,                   // количество
- *       price: 50,                     // цена за штуку
- *       total: 100                     // сумма за этот товар (quantity * price)
- *     },
- *     ...
- *   ]
- * }
- */
 app.post("/order", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
@@ -237,7 +219,6 @@ app.post("/order", async (req, res) => {
       return res.status(400).json({ error: "total required" });
     }
 
-    // Валидация каждого товара в корзине
     for (const item of items) {
       if (!item.id) return res.status(400).json({ error: "Each item must have id" });
       if (!item.title) return res.status(400).json({ error: "Each item must have title" });
@@ -245,7 +226,6 @@ app.post("/order", async (req, res) => {
       if (item.price === undefined) return res.status(400).json({ error: "Each item must have price" });
     }
 
-    // Нормализуем items — считаем total для каждого товара если не передан
     const normalizedItems = items.map((item) => ({
       id: item.id,
       title: item.title,
@@ -309,6 +289,20 @@ app.get("/orders", async (req, res) => {
 // ─── Запуск ───────────────────────────────────────────────────────────────────
 app.listen(PORT, async () => {
   console.log("✅ Server running on port", PORT);
+
+  // ── Keep-alive: пингуем себя каждые 60 сек чтобы Render не засыпал ────────
+  // Это предотвращает cold start 401 который фиксирует UptimeRobot
+  if (process.env.SERVER_URL) {
+    setInterval(async () => {
+      try {
+        const res = await fetch(`${process.env.SERVER_URL}/ping`);
+        console.log("🔁 Self-ping:", res.status);
+      } catch (e) {
+        console.log("🔁 Self-ping failed:", e.message);
+      }
+    }, 60_000); // каждые 60 секунд
+  }
+
   try {
     botInstance = await startBot();
     console.log("✅ Bot started");
