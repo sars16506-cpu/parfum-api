@@ -45,16 +45,13 @@ const normalizePhone = (p = "") => {
 
 let botInstance = null;
 
-// ─── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("OK"));
 
-// ─── Ping (публичный, без авторизации) ───────────────────────────────────────
 app.get("/ping", (req, res) => {
   console.log("🏓 Ping:", new Date().toLocaleTimeString("ru-RU"));
   res.json({ status: "ok", uptime: Math.floor(process.uptime()), time: new Date() });
 });
 
-// ─── Проверить является ли номер админом ──────────────────────────────────────
 app.get("/is-admin", async (req, res) => {
   try {
     const { phone } = req.query;
@@ -76,7 +73,6 @@ app.get("/is-admin", async (req, res) => {
   }
 });
 
-// ─── Начать верификацию ───────────────────────────────────────────────────────
 app.post("/start-verify", async (req, res) => {
   try {
     const { phone } = req.body || {};
@@ -103,7 +99,6 @@ app.post("/start-verify", async (req, res) => {
   }
 });
 
-// ─── Подтвердить номер (вызывается из бота) ───────────────────────────────────
 app.post("/confirm", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
@@ -139,7 +134,6 @@ app.post("/confirm", async (req, res) => {
   }
 });
 
-// ─── Статус верификации ───────────────────────────────────────────────────────
 app.get("/status/:id", async (req, res) => {
   try {
     const { code } = req.query;
@@ -161,57 +155,48 @@ app.get("/status/:id", async (req, res) => {
 });
 
 // ─── Создать заказ ────────────────────────────────────────────────────────────
-/**
- * POST /order
- * Тело запроса:
- * {
- *   "customer_phone": "+998901234567",
- *   "total": 5000,
- *   "valute": "USD",          // общая валюта заказа
- *   "items": [
- *     {
- *       "product_id": "uuid продукта из таблицы products",
- *       "title": "Название",
- *       "brand": "Бренд",
- *       "ml_sizes": 100,       // выбранный объём
- *       "quantity": 2,
- *       "price": 2121,         // цена за 1 шт (со скидкой)
- *       "valute": "USD"
- *     }
- *   ]
- * }
- */
+// POST /order
+// {
+//   "customer_phone": "+998901234567",
+//   "total": 4242,
+//   "valute": "USD",          ← валюта заказа (из таблицы orders)
+//   "items": [
+//     {
+//       "product_id": "uuid",
+//       "title": "Polo Sport",
+//       "ml_sizes": 100,
+//       "quantity": 2,
+//       "price": 2121
+//     }
+//   ]
+// }
 app.post("/order", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
     if (!BOT_SECRET || secret !== BOT_SECRET) return res.status(401).json({ error: "Unauthorized" });
 
-    const { customer_phone, total, items, valute } = req.body || {};
+    const { customer_phone, total, valute, items } = req.body || {};
 
     if (!items || !Array.isArray(items) || items.length === 0)
       return res.status(400).json({ error: "items array required" });
     if (total === undefined || total === null)
       return res.status(400).json({ error: "total required" });
 
-    // Валидация каждого товара
     for (const item of items) {
       if (!item.product_id) return res.status(400).json({ error: "Each item must have product_id" });
       if (!item.title)      return res.status(400).json({ error: "Each item must have title" });
+      if (!item.ml_sizes)   return res.status(400).json({ error: "Each item must have ml_sizes" });
       if (!item.quantity || item.quantity < 1) return res.status(400).json({ error: "Each item must have quantity >= 1" });
       if (item.price === undefined) return res.status(400).json({ error: "Each item must have price" });
-      if (!item.ml_sizes)   return res.status(400).json({ error: "Each item must have ml_sizes" });
     }
 
-    // Нормализуем items — оставляем только нужные поля
+    // Только нужные поля — минимально
     const normalizedItems = items.map((item) => ({
       product_id: item.product_id,
       title:      item.title,
-      brand:      item.brand || null,
       ml_sizes:   item.ml_sizes,
       quantity:   item.quantity,
       price:      item.price,
-      total:      item.total ?? item.quantity * item.price,
-      valute:     item.valute || valute || "USD",
     }));
 
     const r = await fetch(`${SUPABASE_URL}/rest/v1/orders`, {
@@ -242,7 +227,6 @@ app.post("/order", async (req, res) => {
   }
 });
 
-// ─── Список заказов ───────────────────────────────────────────────────────────
 app.get("/orders", async (req, res) => {
   try {
     const secret = req.headers["x-bot-secret"];
@@ -261,11 +245,9 @@ app.get("/orders", async (req, res) => {
   }
 });
 
-// ─── Запуск ───────────────────────────────────────────────────────────────────
 app.listen(PORT, async () => {
   console.log("✅ Server running on port", PORT);
 
-  // Keep-alive: пингуем себя каждые 60 сек чтобы Render не засыпал
   if (process.env.SERVER_URL) {
     setInterval(async () => {
       try {

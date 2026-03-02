@@ -16,8 +16,6 @@ const headers = {
   "Content-Type": "application/json",
 };
 
-// ─── Утилиты ──────────────────────────────────────────────────────────────────
-
 const normalizePhone = (p = "") => {
   let s = String(p).trim().replace(/[^\d+]/g, "");
   if (s.startsWith("00")) s = "+" + s.slice(2);
@@ -96,7 +94,6 @@ async function getOrderItemsStatus(orderId) {
   }
 }
 
-// Отметить товар выданным и уменьшить остаток на складе
 async function setItemGiven(orderId, productId, newGiven) {
   try {
     await fetch(`${SUPABASE_URL}/rest/v1/order_items_status`, {
@@ -108,19 +105,14 @@ async function setItemGiven(orderId, productId, newGiven) {
     console.error("setItemGiven upsert error:", e);
   }
 
-  // Уменьшаем остаток только при выдаче (не при отмене)
   if (!newGiven) return;
 
   try {
     const order = await getOrderById(orderId);
     if (!order?.items) return;
-
-    // product_id — теперь правильное поле
     const item = order.items.find((i) => String(i.product_id) === String(productId));
     if (!item) return;
-
     const qty = item.quantity || 1;
-
     const rp = await fetch(
       `${SUPABASE_URL}/rest/v1/products?id=eq.${productId}&select=id,item_left`,
       { headers }
@@ -128,7 +120,6 @@ async function setItemGiven(orderId, productId, newGiven) {
     const products = await rp.json().catch(() => []);
     const product = Array.isArray(products) ? products[0] : null;
     if (!product) return;
-
     const newLeft = Math.max(0, (product.item_left || 0) - qty);
     await fetch(`${SUPABASE_URL}/rest/v1/products?id=eq.${productId}`, {
       method: "PATCH",
@@ -140,7 +131,7 @@ async function setItemGiven(orderId, productId, newGiven) {
   }
 }
 
-// ─── Билдеры контента ─────────────────────────────────────────────────────────
+// ─── Билдеры ──────────────────────────────────────────────────────────────────
 
 function buildMainMenuContent() {
   const now = new Date().toLocaleString("ru-RU", {
@@ -185,14 +176,12 @@ async function buildOrdersListContent() {
   const buttons = orders.map((o, i) => {
     const statuses = allStatuses[i];
     const items = Array.isArray(o.items) ? o.items : [];
-    const itemCount = items.length;
     const givenCount = statuses.filter((s) => s.given).length;
-    const allDone = itemCount > 0 && givenCount === itemCount;
+    const allDone = items.length > 0 && givenCount === items.length;
     const partial = givenCount > 0 && !allDone;
     const icon = allDone ? "✅" : partial ? "🔄" : "🆕";
-    const date = formatDateShort(o.created_at);
-    // Короткий текст — не превышаем лимит Telegram 64 байта
-    const label = `${icon} #${o.id.slice(0, 6)} · ${o.total}${o.valute ? " " + o.valute : "$"} · ${givenCount}/${itemCount} · ${date}`;
+    const cur = o.valute || "USD";
+    const label = `${icon} #${o.id.slice(0, 6)} · ${o.total} ${cur} · ${givenCount}/${items.length} · ${formatDateShort(o.created_at)}`;
     return [Markup.button.callback(label, `o_${o.id}`)];
   });
 
@@ -212,6 +201,7 @@ async function buildOrderContent(orderId) {
   const items = Array.isArray(order.items) ? order.items : [];
   const givenCount = statuses.filter((s) => s.given).length;
   const allGiven = items.length > 0 && givenCount === items.length;
+  const cur = order.valute || "USD";
 
   const statusIcon = allGiven ? "✅" : givenCount > 0 ? "🔄" : "🆕";
   const statusText = allGiven ? "Выдан полностью" : givenCount > 0 ? "Частично выдан" : "Новый заказ";
@@ -225,34 +215,25 @@ async function buildOrderContent(orderId) {
   text += `──────────────────────\n`;
 
   items.forEach((item) => {
-    // Используем product_id как ключ для поиска статуса
     const st = statuses.find((s) => String(s.product_id) === String(item.product_id));
     const given = st?.given || false;
-    const name  = item.title || item.product_id;
-    const brand = item.brand ? ` · ${item.brand}` : "";
-    const ml    = item.ml_sizes ? ` ${item.ml_sizes}ml` : "";
-    const qty   = item.quantity || 1;
+    const qty = item.quantity || 1;
     const price = item.price ?? 0;
-    const cur   = item.valute || order.valute || "USD";
-    const itemTotal = item.total ?? qty * price;
-
-    text += `${given ? "✅" : "⬜️"} *${name}*${brand}${ml}\n`;
-    text += `    ${qty} шт · ${price} ${cur} · итого *${itemTotal} ${cur}*\n`;
+    text += `${given ? "✅" : "⬜️"} *${item.title}* · ${item.ml_sizes}ml\n`;
+    text += `    ${qty} шт · ${price} ${cur} · итого *${qty * price} ${cur}*\n`;
   });
 
   text += `──────────────────────\n`;
-  text += `💰 *Итого: ${order.total} ${order.valute || "USD"}*`;
+  text += `💰 *Итого: ${order.total} ${cur}*`;
   if (!allGiven) text += `\n\n_Нажми на товар чтобы отметить выданным_`;
 
-  // Кнопки для каждого товара
   const buttons = items.map((item) => {
     const st = statuses.find((s) => String(s.product_id) === String(item.product_id));
     const given = st?.given || false;
-    const name = String(item.title || item.product_id).slice(0, 24);
-    const ml = item.ml_sizes ? ` ${item.ml_sizes}ml` : "";
+    const name = String(item.title).slice(0, 22);
     return [
       Markup.button.callback(
-        `${given ? "✅" : "⬜️"} ${name}${ml}`,
+        `${given ? "✅" : "⬜️"} ${name} · ${item.ml_sizes}ml`,
         `tgl_${order.id}__${item.product_id}`
       ),
     ];
@@ -291,11 +272,9 @@ async function buildStatsContent() {
     const todayOrders     = orders.filter((o) => new Date(o.created_at).toLocaleDateString("ru-RU") === todayStr);
     const yesterdayOrders = orders.filter((o) => new Date(o.created_at).toLocaleDateString("ru-RU") === yesterdayStr);
     const weekOrders      = orders.filter((o) => new Date(o.created_at) >= weekAgo);
-
     const sum = (arr) => arr.reduce((s, o) => s + (o.total || 0), 0);
     const avg = Math.round(sum(orders) / orders.length);
 
-    // Топ продукты по количеству проданных штук
     const productCount = {};
     orders.forEach((o) => {
       (Array.isArray(o.items) ? o.items : []).forEach((item) => {
@@ -305,15 +284,14 @@ async function buildStatsContent() {
     });
     const topProducts = Object.entries(productCount).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
-    let text = `📊 *Статистика*\n`;
-    text += `──────────────────────\n`;
+    let text = `📊 *Статистика*\n──────────────────────\n`;
     text += `📦 Всего заказов: *${orders.length}*\n`;
     text += `💰 Общая выручка: *${sum(orders)} USD*\n`;
     text += `📈 Средний чек: *${avg} USD*\n`;
     text += `──────────────────────\n`;
-    text += `☀️ Сегодня: *${todayOrders.length}* зак · *${sum(todayOrders)} USD*\n`;
-    text += `🌙 Вчера: *${yesterdayOrders.length}* зак · *${sum(yesterdayOrders)} USD*\n`;
-    text += `📅 7 дней: *${weekOrders.length}* зак · *${sum(weekOrders)} USD*\n`;
+    text += `☀️ Сегодня: *${todayOrders.length}* · *${sum(todayOrders)} USD*\n`;
+    text += `🌙 Вчера: *${yesterdayOrders.length}* · *${sum(yesterdayOrders)} USD*\n`;
+    text += `📅 7 дней: *${weekOrders.length}* · *${sum(weekOrders)} USD*\n`;
 
     if (topProducts.length > 0) {
       text += `──────────────────────\n🏆 *Топ товары:*\n`;
@@ -338,8 +316,6 @@ async function buildStatsContent() {
   }
 }
 
-// ─── Reply клавиатура ─────────────────────────────────────────────────────────
-
 const adminReplyMenu = Markup.keyboard([
   ["📦 Заказы", "📊 Статистика"],
   ["🏠 Меню"],
@@ -354,7 +330,6 @@ export async function startBot() {
 
   const bot = new Telegraf(process.env.BOT_TOKEN);
 
-  // Глобальный обработчик — бот не падает при любой ошибке
   bot.catch((err, ctx) => {
     console.error("BOT ERROR:", err?.message || err);
     ctx?.answerCbQuery?.("❌ Ошибка, попробуй ещё раз").catch(() => {});
@@ -406,7 +381,6 @@ export async function startBot() {
     adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
-  // ── /start ────────────────────────────────────────────────────────────────
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
     if (adminSessions.has(ctx.from.id) && !sessionId) {
@@ -502,7 +476,6 @@ export async function startBot() {
     });
   });
 
-  // ── Inline actions ────────────────────────────────────────────────────────
   bot.action("main_menu", (ctx) => updatePanel(ctx, buildMainMenuContent));
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
   bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
@@ -526,25 +499,17 @@ export async function startBot() {
     }
   });
 
-  // ── Уведомление о новом заказе ────────────────────────────────────────────
   bot.notifyAdmins = async (order) => {
     const adminTgIds = [...adminSessions];
     if (adminTgIds.length === 0) return;
     const items = Array.isArray(order.items) ? order.items : [];
     const cur = order.valute || "USD";
-    const itemList = items.map((i) => {
-      const name  = i.title || i.product_id;
-      const brand = i.brand ? ` (${i.brand})` : "";
-      const ml    = i.ml_sizes ? ` ${i.ml_sizes}ml` : "";
-      const qty   = i.quantity || 1;
-      const price = i.price || 0;
-      const total = i.total ?? qty * price;
-      return `• ${name}${brand}${ml} × ${qty} = ${total} ${i.valute || cur}`;
-    }).join("\n");
+    const itemList = items.map((i) =>
+      `• ${i.title} ${i.ml_sizes}ml × ${i.quantity} = ${i.quantity * i.price} ${cur}`
+    ).join("\n");
 
     const msg =
-      `🔔 *Новый заказ!*\n` +
-      `──────────────────────\n` +
+      `🔔 *Новый заказ!*\n──────────────────────\n` +
       `🆔 \`${order.id.slice(0, 8).toUpperCase()}\`\n` +
       `📅 ${formatDate(order.created_at)}\n` +
       (order.customer_phone ? `📱 \`${order.customer_phone}\`\n` : "") +
