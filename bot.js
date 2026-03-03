@@ -13,6 +13,8 @@ const authMessageHistory = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
+const SITE_URL = "https://glow-parfum-uz.netlify.app";
+
 const headers = {
   apikey: SUPABASE_KEY,
   Authorization: `Bearer ${SUPABASE_KEY}`,
@@ -328,7 +330,6 @@ async function buildStatsContent() {
 export async function startBot() {
   if (!process.env.BOT_TOKEN) throw new Error("BOT_TOKEN missing");
   if (!process.env.SERVER_URL) throw new Error("SERVER_URL missing");
-  if (!process.env.SITE_URL) throw new Error("SITE_URL missing");
 
   const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -418,7 +419,7 @@ export async function startBot() {
       return ctx.reply("👋 Добро пожаловать!\nОткрывай наш магазин:", {
         reply_markup: {
           inline_keyboard: [
-            [{ text: "🛍 Открыть магазин", web_app: { url: process.env.SITE_URL } }],
+            [{ text: "🛍 Открыть магазин", web_app: { url: SITE_URL } }],
           ],
         },
       });
@@ -540,14 +541,12 @@ export async function startBot() {
       return;
     }
 
-    // Обычный юзер — чистим мусор и отправляем web_app кнопку
-    // чтобы мини-апп НЕ закрывался при нажатии
     await clearAuthHistory(tgId);
     return ctx.reply("✅ *Номер подтверждён!*\nВернись в магазин:", {
       parse_mode: "Markdown",
       reply_markup: {
         inline_keyboard: [
-          [{ text: "🛍 Открыть магазин", web_app: { url: process.env.SITE_URL } }],
+          [{ text: "🛍 Открыть магазин", web_app: { url: SITE_URL } }],
         ],
       },
     });
@@ -587,8 +586,6 @@ export async function startBot() {
     await updatePanel(ctx, buildOrderContent, order.id);
   });
 
-  // ── Уведомления о новых заказах (не трекаются — не удаляются) ─────────────
-
   bot.notifyAdmins = async (order) => {
     const adminTgIds = [...adminSessions];
     if (adminTgIds.length === 0) return;
@@ -625,8 +622,6 @@ export async function startBot() {
         .catch((e) => console.log("notifyAdmins error:", e));
     }
   };
-
-  // ── Polling новых заказов из Supabase каждые 10 секунд ────────────────────
 
   let lastCheckedAt = new Date().toISOString();
 
