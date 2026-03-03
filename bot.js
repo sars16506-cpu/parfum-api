@@ -7,6 +7,8 @@ const sessions = new Map();
 const pendingCode = new Map();
 const adminSessions = new Set();
 const adminPanelMsg = new Map();
+// Хранит все message_id для каждого admin tgId, чтобы потом удалять
+const adminMessageHistory = new Map(); // tgId -> [{ chatId, messageId }]
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -64,7 +66,6 @@ async function getOrders(limit = 30) {
 
 async function getOrderByShortId(shortId) {
   try {
-    // JS-side filter — надёжнее чем LIKE в Supabase
     const r = await fetch(`${SUPABASE_URL}/rest/v1/orders?order=created_at.desc&limit=100&select=*`, { headers });
     const data = await r.json().catch(() => []);
     if (!Array.isArray(data)) return null;
@@ -183,7 +184,6 @@ async function buildOrdersListContent() {
     const date = formatDateShort(o.created_at);
     const shortId = o.id.slice(0, 8);
     const label = `${icon} #${shortId} · ${o.total} ${cur} · ${givenCount}/${itemCount} · ${date}`;
-    // callback_data = "oid_<8chars>" — всего 12 байт, хорошо влезает в лимит 64
     return [Markup.button.callback(label, `oid_${shortId}`)];
   });
 
@@ -233,7 +233,6 @@ async function buildOrderContent(orderId) {
   text += `💰 *Итого: ${order.total} ${cur}*`;
   if (!allGiven) text += `\n\n_Нажми на товар чтобы отметить выданным_`;
 
-  // callback: "tgl_<8charOrderId>_<itemIndex>" — коротко и надёжно
   const buttons = items.map((item, idx) => {
     const pid = item.product_id ?? item.id;
     const st = statuses.find((s) => String(s.product_id) === String(pid));
@@ -346,6 +345,54 @@ export async function startBot() {
     { command: "stats", description: "📊 Статистика" },
   ]);
 
+  // ── Helpers для работы с историей сообщений ────────────────────────────────
+
+  /**
+   * Добавить message_id в историю для данного tgId
+   */
+  function trackMessage(tgId, chatId, messageId) {
+    if (!adminMessageHistory.has(tgId)) adminMessageHistory.set(tgId, []);
+    adminMessageHistory.get(tgId).push({ chatId, messageId });
+  }
+
+  /**
+   * Удалить все отслеживаемые сообщения для данного tgId
+   */
+  async function clearHistory(tgId) {
+    const msgs = adminMessageHistory.get(tgId);
+    if (!msgs || msgs.length === 0) return;
+    adminMessageHistory.set(tgId, []); // сначала очищаем, потом удаляем
+    for (const { chatId, messageId } of msgs) {
+      await bot.telegram.deleteMessage(chatId, messageId).catch(() => {});
+    }
+  }
+
+  /**
+   * Удалить всю историю и отправить свежее панельное сообщение.
+   * Используется для команд (/start, /orders, /stats, текстовых кнопок).
+   */
+  async function sendPanel(ctx, content) {
+    const { text, kb } = content;
+    const tgId = ctx.from.id;
+
+    // Удаляем входящее сообщение пользователя (команда / текст)
+    if (ctx.message?.message_id) {
+      await bot.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
+    }
+
+    // Удаляем всю предыдущую историю панели
+    await clearHistory(tgId);
+    adminPanelMsg.delete(tgId);
+
+    const sent = await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
+    trackMessage(tgId, sent.chat.id, sent.message_id);
+    adminPanelMsg.set(tgId, { chatId: sent.chat.id, messageId: sent.message_id });
+  }
+
+  /**
+   * Обновить панель через editMessageText (для inline-кнопок).
+   * Если editMessageText не работает — удалить историю и отправить заново.
+   */
   async function updatePanel(ctx, buildFn, ...args) {
     await ctx.answerCbQuery().catch(() => {});
     if (!adminSessions.has(ctx.from.id)) return;
@@ -356,33 +403,22 @@ export async function startBot() {
     const { text, kb } = content;
     try {
       await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
+      // Сообщение уже отслеживается, editMessageText не меняет message_id — всё ок
     } catch (e) {
       if (!String(e?.message || "").includes("message is not modified")) {
+        // Не удалось отредактировать — удаляем всё и шлём новое
+        const tgId = ctx.from.id;
+        await clearHistory(tgId);
+        adminPanelMsg.delete(tgId);
+
         const sent = await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
-        adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
+        trackMessage(tgId, sent.chat.id, sent.message_id);
+        adminPanelMsg.set(tgId, { chatId: sent.chat.id, messageId: sent.message_id });
       }
     }
   }
 
-  async function sendPanel(ctx, content) {
-    const { text, kb } = content;
-    const stored = adminPanelMsg.get(ctx.from.id);
-
-    if (stored) {
-      try {
-        await bot.telegram.editMessageText(stored.chatId, stored.messageId, null, text, {
-          parse_mode: "Markdown",
-          reply_markup: kb.reply_markup,
-        });
-        return;
-      } catch {
-        adminPanelMsg.delete(ctx.from.id);
-      }
-    }
-
-    const sent = await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
-    adminPanelMsg.set(ctx.from.id, { chatId: sent.chat.id, messageId: sent.message_id });
-  }
+  // ── Handlers ───────────────────────────────────────────────────────────────
 
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
@@ -487,7 +523,6 @@ export async function startBot() {
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
   bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
 
-  // ✅ Открыть заказ — callback "oid_<8chars>" (12 байт, лезет в лимит 64)
   bot.action(/^oid_([0-9a-f]{8})$/i, async (ctx) => {
     const shortId = ctx.match[1];
     const order = await getOrderByShortId(shortId);
@@ -495,7 +530,6 @@ export async function startBot() {
     return updatePanel(ctx, buildOrderContent, order.id);
   });
 
-  // ✅ Тумблер товара — callback "tgl_<8charOrderId>_<itemIndex>"
   bot.action(/^tgl_([0-9a-f]{8})_(\d+)$/i, async (ctx) => {
     if (!adminSessions.has(ctx.from.id)) return ctx.answerCbQuery("❌ Нет доступа", { show_alert: true });
 
@@ -552,7 +586,11 @@ export async function startBot() {
     const kb = Markup.inlineKeyboard([[Markup.button.callback("📋 Открыть заказ", `oid_${shortId}`)]]);
 
     for (const tgId of adminTgIds) {
-      await bot.telegram.sendMessage(tgId, msg, { parse_mode: "Markdown", reply_markup: kb.reply_markup }).catch(() => {});
+      const sent = await bot.telegram
+        .sendMessage(tgId, msg, { parse_mode: "Markdown", reply_markup: kb.reply_markup })
+        .catch(() => null);
+      // Уведомление о заказе тоже отслеживаем, чтобы оно удалялось при следующем sendPanel
+      if (sent) trackMessage(tgId, sent.chat.id, sent.message_id);
     }
   };
 
