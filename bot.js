@@ -7,8 +7,7 @@ const sessions = new Map();
 const pendingCode = new Map();
 const adminSessions = new Set();
 const adminPanelMsg = new Map();
-// Хранит все message_id для каждого admin tgId, чтобы потом удалять
-const adminMessageHistory = new Map(); // tgId -> [{ chatId, messageId }]
+const adminMessageHistory = new Map();
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -50,8 +49,6 @@ function formatDate(iso) {
 function formatDateShort(iso) {
   return new Date(iso).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" });
 }
-
-// ─── Supabase helpers ─────────────────────────────────────────────────────────
 
 async function getOrders(limit = 30) {
   try {
@@ -131,8 +128,6 @@ async function setItemGiven(orderId, productId, newGiven) {
     console.log("setItemGiven error:", e);
   }
 }
-
-// ─── UI builders ──────────────────────────────────────────────────────────────
 
 function buildMainMenuContent() {
   const now = new Date().toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -330,8 +325,6 @@ async function buildStatsContent() {
   }
 }
 
-// ─── startBot ────────────────────────────────────────────────────────────────
-
 export async function startBot() {
   if (!process.env.BOT_TOKEN) throw new Error("BOT_TOKEN missing");
   if (!process.env.SERVER_URL) throw new Error("SERVER_URL missing");
@@ -344,8 +337,6 @@ export async function startBot() {
     { command: "orders", description: "📦 Заказы" },
     { command: "stats", description: "📊 Статистика" },
   ]);
-
-  // ── Helpers для работы с историей сообщений ────────────────────────────────
 
   function trackMessage(tgId, chatId, messageId) {
     if (!adminMessageHistory.has(tgId)) adminMessageHistory.set(tgId, []);
@@ -400,18 +391,14 @@ export async function startBot() {
     }
   }
 
-  // ── Handlers ───────────────────────────────────────────────────────────────
-
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
 
-    // Уже авторизованный админ без payload — показываем панель
     if (adminSessions.has(ctx.from.id) && !sessionId) {
       await sendPanel(ctx, buildMainMenuContent());
       return;
     }
 
-    // Нет payload — пришёл не с сайта, показываем Mini App
     if (!sessionId) {
       return ctx.reply("👋 Добро пожаловать!\nОткрывай наш магазин:", {
         reply_markup: {
@@ -422,7 +409,6 @@ export async function startBot() {
       });
     }
 
-    // Есть payload — авторизация с сайта
     sessions.set(ctx.from.id, sessionId);
     return ctx.reply("👋 *Привет!*\nНажми кнопку ниже чтобы поделиться номером телефона:", {
       parse_mode: "Markdown",
@@ -513,8 +499,6 @@ export async function startBot() {
     });
   });
 
-  // ── Inline actions ─────────────────────────────────────────────────────────
-
   bot.action("main_menu", (ctx) => updatePanel(ctx, buildMainMenuContent));
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
   bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
@@ -550,6 +534,7 @@ export async function startBot() {
   });
 
   // ── Уведомление о новом заказе ─────────────────────────────────────────────
+  // Отправляет НОВОЕ сообщение, НЕ трекается — не удаляется при clearHistory
 
   bot.notifyAdmins = async (order) => {
     const adminTgIds = [...adminSessions];
@@ -582,12 +567,37 @@ export async function startBot() {
     const kb = Markup.inlineKeyboard([[Markup.button.callback("📋 Открыть заказ", `oid_${shortId}`)]]);
 
     for (const tgId of adminTgIds) {
-      const sent = await bot.telegram
+      await bot.telegram
         .sendMessage(tgId, msg, { parse_mode: "Markdown", reply_markup: kb.reply_markup })
-        .catch(() => null);
-      if (sent) trackMessage(tgId, sent.chat.id, sent.message_id);
+        .catch((e) => console.log("notifyAdmins error:", e));
     }
   };
+
+  // ── Polling новых заказов из Supabase каждые 10 секунд ────────────────────
+
+  let lastCheckedAt = new Date().toISOString();
+
+  async function pollNewOrders() {
+    try {
+      const url = `${SUPABASE_URL}/rest/v1/orders?created_at=gt.${encodeURIComponent(lastCheckedAt)}&order=created_at.asc&select=*`;
+      const r = await fetch(url, { headers });
+      const newOrders = await r.json().catch(() => []);
+      if (!Array.isArray(newOrders) || newOrders.length === 0) return;
+
+      lastCheckedAt = newOrders[newOrders.length - 1].created_at;
+
+      for (const order of newOrders) {
+        console.log(`🔔 Новый заказ: ${order.id}`);
+        await bot.notifyAdmins(order);
+      }
+    } catch (e) {
+      console.log("pollNewOrders error:", e);
+    }
+  }
+
+  setTimeout(() => {
+    setInterval(pollNewOrders, 10_000);
+  }, 5_000);
 
   try {
     await bot.launch();
