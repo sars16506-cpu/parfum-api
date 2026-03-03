@@ -9,6 +9,9 @@ const adminSessions = new Set();
 const adminPanelMsg = new Map();
 const adminMessageHistory = new Map();
 
+// Трекаем ВСЕ сообщения юзера во время авторизации (чтобы потом удалить)
+const authMessageHistory = new Map(); // tgId -> [{ chatId, messageId }]
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
@@ -337,14 +340,29 @@ export async function startBot() {
     { command: "stats", description: "📊 Статистика" },
   ]);
 
-  // Трекаем ТОЛЬКО панели бота — не пользовательские сообщения
-  function trackPanel(tgId, chatId, messageId) {
+  // ── Message tracking helpers ───────────────────────────────────────────────
+
+  function trackMessage(tgId, chatId, messageId) {
     if (!adminMessageHistory.has(tgId)) adminMessageHistory.set(tgId, []);
     adminMessageHistory.get(tgId).push({ chatId, messageId });
   }
 
-  // Удаляем только предыдущие панели
-  async function clearPanels(tgId) {
+  // Трекаем сообщения авторизации (входящие от юзера + ответы бота до логина)
+  function trackAuth(tgId, chatId, messageId) {
+    if (!authMessageHistory.has(tgId)) authMessageHistory.set(tgId, []);
+    authMessageHistory.get(tgId).push({ chatId, messageId });
+  }
+
+  async function clearAuthHistory(tgId) {
+    const msgs = authMessageHistory.get(tgId);
+    if (!msgs || msgs.length === 0) return;
+    authMessageHistory.set(tgId, []);
+    for (const { chatId, messageId } of msgs) {
+      await bot.telegram.deleteMessage(chatId, messageId).catch(() => {});
+    }
+  }
+
+  async function clearHistory(tgId) {
     const msgs = adminMessageHistory.get(tgId);
     if (!msgs || msgs.length === 0) return;
     adminMessageHistory.set(tgId, []);
@@ -357,12 +375,15 @@ export async function startBot() {
     const { text, kb } = content;
     const tgId = ctx.from.id;
 
-    // Удаляем только предыдущие панели — НЕ трогаем сообщения пользователя
-    await clearPanels(tgId);
+    if (ctx.message?.message_id) {
+      await bot.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
+    }
+
+    await clearHistory(tgId);
     adminPanelMsg.delete(tgId);
 
     const sent = await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
-    trackPanel(tgId, sent.chat.id, sent.message_id);
+    trackMessage(tgId, sent.chat.id, sent.message_id);
     adminPanelMsg.set(tgId, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
@@ -379,24 +400,29 @@ export async function startBot() {
     } catch (e) {
       if (!String(e?.message || "").includes("message is not modified")) {
         const tgId = ctx.from.id;
-        await clearPanels(tgId);
+        await clearHistory(tgId);
         adminPanelMsg.delete(tgId);
 
         const sent = await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
-        trackPanel(tgId, sent.chat.id, sent.message_id);
+        trackMessage(tgId, sent.chat.id, sent.message_id);
         adminPanelMsg.set(tgId, { chatId: sent.chat.id, messageId: sent.message_id });
       }
     }
   }
 
+  // ── Handlers ───────────────────────────────────────────────────────────────
+
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
+    const tgId = ctx.from.id;
 
-    if (adminSessions.has(ctx.from.id) && !sessionId) {
+    // Уже авторизованный админ — показываем панель
+    if (adminSessions.has(tgId) && !sessionId) {
       await sendPanel(ctx, buildMainMenuContent());
       return;
     }
 
+    // Нет payload — обычный юзер
     if (!sessionId) {
       return ctx.reply("👋 Добро пожаловать!\nОткрывай наш магазин:", {
         reply_markup: {
@@ -407,11 +433,19 @@ export async function startBot() {
       });
     }
 
-    sessions.set(ctx.from.id, sessionId);
-    return ctx.reply("👋 *Привет!*\nНажми кнопку ниже чтобы поделиться номером телефона:", {
+    // Есть payload — начало авторизации
+    // Трекаем /start от юзера
+    if (ctx.message?.message_id) {
+      trackAuth(tgId, ctx.chat.id, ctx.message.message_id);
+    }
+
+    sessions.set(tgId, sessionId);
+
+    const sent = await ctx.reply("👋 *Привет!*\nНажми кнопку ниже чтобы поделиться номером телефона:", {
       parse_mode: "Markdown",
       ...Markup.keyboard([Markup.button.contactRequest("📱 Поделиться номером")]).resize(),
     });
+    trackAuth(tgId, sent.chat.id, sent.message_id);
   });
 
   bot.command("orders", async (ctx) => {
@@ -440,28 +474,48 @@ export async function startBot() {
   });
 
   bot.on("contact", async (ctx) => {
-    const sessionId = sessions.get(ctx.from.id);
+    const tgId = ctx.from.id;
+    const sessionId = sessions.get(tgId);
     if (!sessionId) return ctx.reply("Открой бота по ссылке с сайта заново.");
+
     const c = ctx.message.contact;
-    if (c.user_id !== ctx.from.id) return ctx.reply("❌ Можно отправить только свой номер.");
+    if (c.user_id !== tgId) return ctx.reply("❌ Можно отправить только свой номер.");
+
+    // Трекаем сообщение с контактом
+    if (ctx.message?.message_id) {
+      trackAuth(tgId, ctx.chat.id, ctx.message.message_id);
+    }
+
     const phone = normalizePhone(c.phone_number);
-    pendingCode.set(ctx.from.id, { sessionId, phone });
-    sessions.delete(ctx.from.id);
-    return ctx.reply("✅ *Номер получен!*\n\nТеперь введи *6-значный код* с сайта:", {
+    pendingCode.set(tgId, { sessionId, phone });
+    sessions.delete(tgId);
+
+    const sent = await ctx.reply("✅ *Номер получен!*\n\nТеперь введи *6-значный код* с сайта:", {
       parse_mode: "Markdown",
       ...Markup.removeKeyboard(),
     });
+    trackAuth(tgId, sent.chat.id, sent.message_id);
   });
 
   bot.on("text", async (ctx) => {
+    const tgId = ctx.from.id;
     const text = ctx.message.text?.trim();
     if (!text || text.startsWith("/")) return;
     if (["📦 Заказы", "📊 Статистика", "🏠 Меню"].includes(text)) return;
 
-    const pending = pendingCode.get(ctx.from.id);
+    const pending = pendingCode.get(tgId);
     if (!pending) return;
 
-    if (!/^\d{6}$/.test(text)) return ctx.reply("Введи ровно 6 цифр. Попробуй ещё раз.");
+    // Трекаем сообщение с кодом от юзера
+    if (ctx.message?.message_id) {
+      trackAuth(tgId, ctx.chat.id, ctx.message.message_id);
+    }
+
+    if (!/^\d{6}$/.test(text)) {
+      const sent = await ctx.reply("Введи ровно 6 цифр. Попробуй ещё раз.");
+      trackAuth(tgId, sent.chat.id, sent.message_id);
+      return;
+    }
 
     const { sessionId, phone } = pending;
 
@@ -473,29 +527,43 @@ export async function startBot() {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        if (data?.error === "Wrong code") return ctx.reply("❌ Неверный код. Посмотри на сайте и попробуй ещё раз.");
-        return ctx.reply(`❌ Ошибка: ${data?.error || "confirm failed"}`);
+        if (data?.error === "Wrong code") {
+          const sent = await ctx.reply("❌ Неверный код. Посмотри на сайте и попробуй ещё раз.");
+          trackAuth(tgId, sent.chat.id, sent.message_id);
+          return;
+        }
+        const sent = await ctx.reply(`❌ Ошибка: ${data?.error || "confirm failed"}`);
+        trackAuth(tgId, sent.chat.id, sent.message_id);
+        return;
       }
     } catch {
-      return ctx.reply("❌ Сервер недоступен. Попробуй позже.");
+      const sent = await ctx.reply("❌ Сервер недоступен. Попробуй позже.");
+      trackAuth(tgId, sent.chat.id, sent.message_id);
+      return;
     }
 
-    pendingCode.delete(ctx.from.id);
+    pendingCode.delete(tgId);
 
     const admin = await isAdmin(phone);
     const backUrl = `${process.env.SITE_URL}/verify?sessionId=${sessionId}`;
 
     if (admin) {
-      adminSessions.add(ctx.from.id);
+      adminSessions.add(tgId);
+      // Удаляем весь мусор авторизации перед показом панели
+      await clearAuthHistory(tgId);
       await sendPanel(ctx, buildMainMenuContent());
       return;
     }
 
+    // Обычный юзер — тоже чистим авторизационный мусор
+    await clearAuthHistory(tgId);
     return ctx.reply("✅ *Номер подтверждён!*\nМожешь вернуться на сайт:", {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]]),
     });
   });
+
+  // ── Inline actions ─────────────────────────────────────────────────────────
 
   bot.action("main_menu", (ctx) => updatePanel(ctx, buildMainMenuContent));
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
@@ -531,8 +599,7 @@ export async function startBot() {
     await updatePanel(ctx, buildOrderContent, order.id);
   });
 
-  // ── Уведомление о новом заказе ─────────────────────────────────────────────
-  // Отправляет НОВОЕ сообщение, НЕ трекается — не удаляется при clearPanels
+  // ── Уведомления о новых заказах (не трекаются — не удаляются) ─────────────
 
   bot.notifyAdmins = async (order) => {
     const adminTgIds = [...adminSessions];
