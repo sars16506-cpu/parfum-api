@@ -8,9 +8,7 @@ const pendingCode = new Map();
 const adminSessions = new Set();
 const adminPanelMsg = new Map();
 const adminMessageHistory = new Map();
-
-// Трекаем ВСЕ сообщения юзера во время авторизации (чтобы потом удалить)
-const authMessageHistory = new Map(); // tgId -> [{ chatId, messageId }]
+const authMessageHistory = new Map();
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -340,14 +338,11 @@ export async function startBot() {
     { command: "stats", description: "📊 Статистика" },
   ]);
 
-  // ── Message tracking helpers ───────────────────────────────────────────────
-
   function trackMessage(tgId, chatId, messageId) {
     if (!adminMessageHistory.has(tgId)) adminMessageHistory.set(tgId, []);
     adminMessageHistory.get(tgId).push({ chatId, messageId });
   }
 
-  // Трекаем сообщения авторизации (входящие от юзера + ответы бота до логина)
   function trackAuth(tgId, chatId, messageId) {
     if (!authMessageHistory.has(tgId)) authMessageHistory.set(tgId, []);
     authMessageHistory.get(tgId).push({ chatId, messageId });
@@ -410,19 +405,15 @@ export async function startBot() {
     }
   }
 
-  // ── Handlers ───────────────────────────────────────────────────────────────
-
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
     const tgId = ctx.from.id;
 
-    // Уже авторизованный админ — показываем панель
     if (adminSessions.has(tgId) && !sessionId) {
       await sendPanel(ctx, buildMainMenuContent());
       return;
     }
 
-    // Нет payload — обычный юзер
     if (!sessionId) {
       return ctx.reply("👋 Добро пожаловать!\nОткрывай наш магазин:", {
         reply_markup: {
@@ -433,8 +424,6 @@ export async function startBot() {
       });
     }
 
-    // Есть payload — начало авторизации
-    // Трекаем /start от юзера
     if (ctx.message?.message_id) {
       trackAuth(tgId, ctx.chat.id, ctx.message.message_id);
     }
@@ -481,7 +470,6 @@ export async function startBot() {
     const c = ctx.message.contact;
     if (c.user_id !== tgId) return ctx.reply("❌ Можно отправить только свой номер.");
 
-    // Трекаем сообщение с контактом
     if (ctx.message?.message_id) {
       trackAuth(tgId, ctx.chat.id, ctx.message.message_id);
     }
@@ -506,7 +494,6 @@ export async function startBot() {
     const pending = pendingCode.get(tgId);
     if (!pending) return;
 
-    // Трекаем сообщение с кодом от юзера
     if (ctx.message?.message_id) {
       trackAuth(tgId, ctx.chat.id, ctx.message.message_id);
     }
@@ -545,25 +532,26 @@ export async function startBot() {
     pendingCode.delete(tgId);
 
     const admin = await isAdmin(phone);
-    const backUrl = `${process.env.SITE_URL}/verify?sessionId=${sessionId}`;
 
     if (admin) {
       adminSessions.add(tgId);
-      // Удаляем весь мусор авторизации перед показом панели
       await clearAuthHistory(tgId);
       await sendPanel(ctx, buildMainMenuContent());
       return;
     }
 
-    // Обычный юзер — тоже чистим авторизационный мусор
+    // Обычный юзер — чистим мусор и отправляем web_app кнопку
+    // чтобы мини-апп НЕ закрывался при нажатии
     await clearAuthHistory(tgId);
-    return ctx.reply("✅ *Номер подтверждён!*\nМожешь вернуться на сайт:", {
+    return ctx.reply("✅ *Номер подтверждён!*\nВернись в магазин:", {
       parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([[Markup.button.url("🚀 На сайт", backUrl)]]),
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🛍 Открыть магазин", web_app: { url: process.env.SITE_URL } }],
+        ],
+      },
     });
   });
-
-  // ── Inline actions ─────────────────────────────────────────────────────────
 
   bot.action("main_menu", (ctx) => updatePanel(ctx, buildMainMenuContent));
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
