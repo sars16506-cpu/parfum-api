@@ -347,40 +347,28 @@ export async function startBot() {
 
   // ── Helpers для работы с историей сообщений ────────────────────────────────
 
-  /**
-   * Добавить message_id в историю для данного tgId
-   */
   function trackMessage(tgId, chatId, messageId) {
     if (!adminMessageHistory.has(tgId)) adminMessageHistory.set(tgId, []);
     adminMessageHistory.get(tgId).push({ chatId, messageId });
   }
 
-  /**
-   * Удалить все отслеживаемые сообщения для данного tgId
-   */
   async function clearHistory(tgId) {
     const msgs = adminMessageHistory.get(tgId);
     if (!msgs || msgs.length === 0) return;
-    adminMessageHistory.set(tgId, []); // сначала очищаем, потом удаляем
+    adminMessageHistory.set(tgId, []);
     for (const { chatId, messageId } of msgs) {
       await bot.telegram.deleteMessage(chatId, messageId).catch(() => {});
     }
   }
 
-  /**
-   * Удалить всю историю и отправить свежее панельное сообщение.
-   * Используется для команд (/start, /orders, /stats, текстовых кнопок).
-   */
   async function sendPanel(ctx, content) {
     const { text, kb } = content;
     const tgId = ctx.from.id;
 
-    // Удаляем входящее сообщение пользователя (команда / текст)
     if (ctx.message?.message_id) {
       await bot.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
     }
 
-    // Удаляем всю предыдущую историю панели
     await clearHistory(tgId);
     adminPanelMsg.delete(tgId);
 
@@ -389,10 +377,6 @@ export async function startBot() {
     adminPanelMsg.set(tgId, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
-  /**
-   * Обновить панель через editMessageText (для inline-кнопок).
-   * Если editMessageText не работает — удалить историю и отправить заново.
-   */
   async function updatePanel(ctx, buildFn, ...args) {
     await ctx.answerCbQuery().catch(() => {});
     if (!adminSessions.has(ctx.from.id)) return;
@@ -403,10 +387,8 @@ export async function startBot() {
     const { text, kb } = content;
     try {
       await ctx.editMessageText(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
-      // Сообщение уже отслеживается, editMessageText не меняет message_id — всё ок
     } catch (e) {
       if (!String(e?.message || "").includes("message is not modified")) {
-        // Не удалось отредактировать — удаляем всё и шлём новое
         const tgId = ctx.from.id;
         await clearHistory(tgId);
         adminPanelMsg.delete(tgId);
@@ -422,11 +404,25 @@ export async function startBot() {
 
   bot.start(async (ctx) => {
     const sessionId = ctx.startPayload;
+
+    // Уже авторизованный админ без payload — показываем панель
     if (adminSessions.has(ctx.from.id) && !sessionId) {
       await sendPanel(ctx, buildMainMenuContent());
       return;
     }
-    if (!sessionId) return ctx.reply("🔐 Открой бота по ссылке с сайта для авторизации.");
+
+    // Нет payload — пришёл не с сайта, показываем Mini App
+    if (!sessionId) {
+      return ctx.reply("👋 Добро пожаловать!\nОткрывай наш магазин:", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🛍 Открыть магазин", web_app: { url: process.env.SITE_URL } }],
+          ],
+        },
+      });
+    }
+
+    // Есть payload — авторизация с сайта
     sessions.set(ctx.from.id, sessionId);
     return ctx.reply("👋 *Привет!*\nНажми кнопку ниже чтобы поделиться номером телефона:", {
       parse_mode: "Markdown",
@@ -589,7 +585,6 @@ export async function startBot() {
       const sent = await bot.telegram
         .sendMessage(tgId, msg, { parse_mode: "Markdown", reply_markup: kb.reply_markup })
         .catch(() => null);
-      // Уведомление о заказе тоже отслеживаем, чтобы оно удалялось при следующем sendPanel
       if (sent) trackMessage(tgId, sent.chat.id, sent.message_id);
     }
   };
