@@ -67,7 +67,6 @@ async function getOrderByShortId(shortId) {
     const data = await r.json().catch(() => []);
     if (!Array.isArray(data)) return null;
     const found = data.find((o) => String(o.id).toLowerCase().startsWith(shortId.toLowerCase()));
-    console.log("getOrderByShortId", shortId, "->", found?.id || "NOT FOUND");
     return found || null;
   } catch (e) {
     console.log("getOrderByShortId error:", e);
@@ -338,12 +337,14 @@ export async function startBot() {
     { command: "stats", description: "📊 Статистика" },
   ]);
 
-  function trackMessage(tgId, chatId, messageId) {
+  // Трекаем ТОЛЬКО панели бота — не пользовательские сообщения
+  function trackPanel(tgId, chatId, messageId) {
     if (!adminMessageHistory.has(tgId)) adminMessageHistory.set(tgId, []);
     adminMessageHistory.get(tgId).push({ chatId, messageId });
   }
 
-  async function clearHistory(tgId) {
+  // Удаляем только предыдущие панели
+  async function clearPanels(tgId) {
     const msgs = adminMessageHistory.get(tgId);
     if (!msgs || msgs.length === 0) return;
     adminMessageHistory.set(tgId, []);
@@ -356,15 +357,12 @@ export async function startBot() {
     const { text, kb } = content;
     const tgId = ctx.from.id;
 
-    if (ctx.message?.message_id) {
-      await bot.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id).catch(() => {});
-    }
-
-    await clearHistory(tgId);
+    // Удаляем только предыдущие панели — НЕ трогаем сообщения пользователя
+    await clearPanels(tgId);
     adminPanelMsg.delete(tgId);
 
     const sent = await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
-    trackMessage(tgId, sent.chat.id, sent.message_id);
+    trackPanel(tgId, sent.chat.id, sent.message_id);
     adminPanelMsg.set(tgId, { chatId: sent.chat.id, messageId: sent.message_id });
   }
 
@@ -381,11 +379,11 @@ export async function startBot() {
     } catch (e) {
       if (!String(e?.message || "").includes("message is not modified")) {
         const tgId = ctx.from.id;
-        await clearHistory(tgId);
+        await clearPanels(tgId);
         adminPanelMsg.delete(tgId);
 
         const sent = await ctx.reply(text, { parse_mode: "Markdown", reply_markup: kb.reply_markup });
-        trackMessage(tgId, sent.chat.id, sent.message_id);
+        trackPanel(tgId, sent.chat.id, sent.message_id);
         adminPanelMsg.set(tgId, { chatId: sent.chat.id, messageId: sent.message_id });
       }
     }
@@ -534,7 +532,7 @@ export async function startBot() {
   });
 
   // ── Уведомление о новом заказе ─────────────────────────────────────────────
-  // Отправляет НОВОЕ сообщение, НЕ трекается — не удаляется при clearHistory
+  // Отправляет НОВОЕ сообщение, НЕ трекается — не удаляется при clearPanels
 
   bot.notifyAdmins = async (order) => {
     const adminTgIds = [...adminSessions];
