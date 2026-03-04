@@ -13,7 +13,7 @@ const authMessageHistory = new Map();
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
-const SITE_URL = "https://glow-parfum-uz.netlify.app";
+const SITE_URL = process.env.SITE_URL || "https://glow-parfum-uz.vercel.app";
 
 const headers = {
   apikey: SUPABASE_KEY,
