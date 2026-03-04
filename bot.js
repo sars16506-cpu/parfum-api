@@ -154,22 +154,27 @@ async function buildOrdersListContent() {
 
   const allStatuses = await Promise.all(orders.map((o) => getOrderItemsStatus(o.id)));
 
-  const totalNew = allStatuses.filter((st, i) => {
-    const items = Array.isArray(orders[i].items) ? orders[i].items : [];
-    return items.length > 0 && st.filter((s) => s.given).length === 0;
-  }).length;
+  // Разбиваем на активные (новые/частичные) и завершённые
+  const active = [];
+  const done = [];
 
-  const totalDone = allStatuses.filter((st, i) => {
-    const items = Array.isArray(orders[i].items) ? orders[i].items : [];
-    return items.length > 0 && st.filter((s) => s.given).length === items.length;
-  }).length;
+  orders.forEach((o, i) => {
+    const statuses = allStatuses[i];
+    const items = Array.isArray(o.items) ? o.items : [];
+    const givenCount = statuses.filter((s) => s.given).length;
+    const allDone = items.length > 0 && givenCount === items.length;
+    if (allDone) done.push({ o, i });
+    else active.push({ o, i });
+  });
+
+  const totalNew = active.filter(({ i }) => allStatuses[i].filter((s) => s.given).length === 0).length;
 
   let text = `📦 *Заказы* — последние ${orders.length}\n`;
-  text += `🆕 новых: *${totalNew}*  ✅ выдано: *${totalDone}*\n`;
+  text += `🆕 новых: *${totalNew}*  ✅ выдано: *${done.length}*\n`;
   text += `─────────────────────\n`;
   text += `_Выбери заказ:_`;
 
-  const buttons = orders.map((o, i) => {
+  function makeButton({ o, i }) {
     const statuses = allStatuses[i];
     const items = Array.isArray(o.items) ? o.items : [];
     const givenCount = statuses.filter((s) => s.given).length;
@@ -182,7 +187,21 @@ async function buildOrdersListContent() {
     const shortId = o.id.slice(0, 8);
     const label = `${icon} #${shortId} · ${o.total} ${cur} · ${givenCount}/${itemCount} · ${date}`;
     return [Markup.button.callback(label, `oid_${shortId}`)];
-  });
+  }
+
+  const buttons = [];
+
+  // Раздел: Новые / В процессе
+  if (active.length > 0) {
+    buttons.push([Markup.button.callback(`━━━ 🆕 Активные (${active.length}) ━━━`, "noop")]);
+    active.forEach((entry) => buttons.push(makeButton(entry)));
+  }
+
+  // Раздел: Завершённые
+  if (done.length > 0) {
+    buttons.push([Markup.button.callback(`━━━ ✅ Выданные (${done.length}) ━━━`, "noop")]);
+    done.forEach((entry) => buttons.push(makeButton(entry)));
+  }
 
   buttons.push([
     Markup.button.callback("🔄 Обновить", "orders_list"),
@@ -555,6 +574,9 @@ export async function startBot() {
   bot.action("main_menu", (ctx) => updatePanel(ctx, buildMainMenuContent));
   bot.action("orders_list", (ctx) => updatePanel(ctx, buildOrdersListContent));
   bot.action("stats", (ctx) => updatePanel(ctx, buildStatsContent));
+
+  // Заглушка для кнопок-разделителей
+  bot.action("noop", (ctx) => ctx.answerCbQuery().catch(() => {}));
 
   bot.action(/^oid_([0-9a-f]{8})$/i, async (ctx) => {
     const shortId = ctx.match[1];
